@@ -13,7 +13,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import models, schemas, crud, utils, database, oauth2
 
-from .config import ADMIN_PASSWORD  # Importer ADMIN_PASSWORD
+from .config import ADMIN_PASSWORD, STREAM_URL  # Importer ADMIN_PASSWORD
 
 app = FastAPI()
 
@@ -115,7 +115,11 @@ async def get_profile(request: Request, current_user: schemas.User = Depends(oau
 # Page protégée (stream)
 @app.get("/stream", response_class=HTMLResponse)
 async def read_stream(request: Request, current_user: schemas.User = Depends(oauth2.get_current_user)):
-    return templates.TemplateResponse("stream.html", {"request": request, "user": current_user})
+    return templates.TemplateResponse("stream.html", {
+        "request": request,
+        "user": current_user,
+        "stream_url": STREAM_URL  # Passer l'URL du flux au template
+    })
 
 @app.post("/logout")
 def logout(response: Response):

@@ -55,7 +55,7 @@
       <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
       <script>
             const video = document.getElementById('video');
-            const videoSrc = 'https://www.boissard.net/stream/hls/stream.m3u8';
+            const videoSrc = "{{ stream_url }}";
 
             if (Hls.isSupported()) {
                   const hls = new Hls();
