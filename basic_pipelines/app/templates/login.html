@@ -1,31 +1,73 @@
-<!DOCTYPE html>
-<html lang="fr">
+{% extends "base.html" %}
 
-<head>
-      <meta charset="UTF-8">
-      <title>Login - WetTheCat</title>
-      <link rel="stylesheet" href="/static/css/styles.css">
-</head>
+{% block title %}Login - WetTheCat{% endblock %}
 
-<body>
-      <div class="container">
-            <h2>Login</h2>
-            <form id="login-form">
-                  <label for="username">Username or Email:</label><br>
-                  <input type="text" id="username" name="username" required><br><br>
-                  <label for="password">Password:</label><br>
-                  <input type="password" id="password" name="password" required>
-                  <input type="checkbox" id="show-password"> Afficher le mot de passe<br><br>
-                  <button type="submit">Login</button>
-            </form>
-            <p>Pas de compte ? <a href="/register-page">Inscrivez-vous ici</a>.</p>
-      </div>
-      <script>
-            document.getElementById('login-form').addEventListener('submit', async (e) => {
-                  e.preventDefault();
-                  const username = document.getElementById('username').value;
-                  const password = document.getElementById('password').value;
+{% block content %}
+<div class="form-container">
+      <h2>Login</h2>
+      <form id="login-form">
+            <label>
+                  <input type="text" id="username" name="username" placeholder="Username or Email" required>
+            </label>
 
+            <label>
+                  <input type="password" id="password" name="password" placeholder="Mot de passe" required>
+                  <div class="password-icon">
+                        <i data-feather="eye" class="eye-icon"></i>
+                        <i data-feather="eye-off" class="eye-off-icon" style="display: none;"></i>
+                  </div>
+            </label>
+
+            <button type="submit" class="button">Login</button>
+      </form>
+      <p>Pas de compte ? <a href="/register-page" class="button">Inscrivez-vous ici</a></p>
+
+      <!-- Conteneur pour les messages d'erreur -->
+      <div id="error-message" class="error-message"></div>
+</div>
+
+<!-- ICON SCRIPT -->
+<script src="https://unpkg.com/feather-icons"></script>
+<script>
+      feather.replace();
+
+      const eye = document.querySelector(".eye-icon");
+      const eyeoff = document.querySelector(".eye-off-icon");
+      const passwordField = document.querySelector("input[type=password]");
+
+      eye.addEventListener("click", () => {
+            eye.style.display = "none";
+            eyeoff.style.display = "block";
+
+            passwordField.type = "text";
+      });
+
+      eyeoff.addEventListener("click", () => {
+            eyeoff.style.display = "none";
+            eye.style.display = "block";
+
+            passwordField.type = "password";
+      });
+
+      // Gestionnaire de soumission du formulaire de login
+      document.getElementById('login-form').addEventListener('submit', async (e) => {
+            e.preventDefault(); // Empêche le comportement par défaut du formulaire
+
+            // Masquer les messages d'erreur précédents
+            const errorDiv = document.getElementById('error-message');
+            errorDiv.classList.remove('visible');
+
+            // Récupérer les valeurs des champs
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value;
+
+            // Validation de base côté client
+            if (!username || !password) {
+                  displayError('Veuillez remplir tous les champs.');
+                  return;
+            }
+
+            try {
                   const response = await fetch('/token', {
                         method: 'POST',
                         headers: {
@@ -34,26 +76,37 @@
                         body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
                   });
 
+                  console.log('Réponse du serveur :', response);
+
+                  if (!response.ok) {
+                        // Tenter de récupérer les détails de l'erreur
+                        let errorData;
+                        try {
+                              errorData = await response.json();
+                        } catch (jsonError) {
+                              <!-- console.error('Erreur lors de la parsing de la réponse JSON :', jsonError); -->
+                              throw new Error('Réponse du serveur non valide.');
+                        }
+                        displayError(errorData.detail || 'Login échoué.');
+                        return;
+                  }
+
                   const data = await response.json();
-                  if (response.ok) {
-                        // Rediriger vers la page d'accueil
-                        window.location.href = '/';
-                  } else {
-                        alert(data.detail || 'Login failed');
-                  }
-            });
-            
-            // Fonctionnalité pour afficher/masquer le mot de passe
-            document.getElementById('show-password').addEventListener('change', function () {
-                  const passwordInput = document.getElementById('password');
-                  if (this.checked) {
-                        passwordInput.type = 'text';
-                  } else {
-                        passwordInput.type = 'password';
-                  }
-            });
+                  // Rediriger vers la page d'accueil après le login réussi
+                  window.location.href = '/';
+            } catch (error) {
+                  displayError('Le nom d\'utilisateur ou mot de passe est incorrect');
+            }
+      });
+      /**
+      * Fonction pour afficher les messages d'erreur
+      * @param {string} message - Le message d'erreur à afficher
+      */
+      function displayError(message) {
+            const errorDiv = document.getElementById('error-message');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+      }
+</script>
+{% endblock %}
 
-      </script>
-</body>
-
-</html>

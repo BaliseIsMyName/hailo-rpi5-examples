@@ -1,41 +1,92 @@
-<!-- /home/raspi/hailo-rpi5-examples/basic_pipelines/app/templates/register.html -->
+{% extends "base.html" %}
 
-<!DOCTYPE html>
-<html lang="fr">
+{% block title %}Register - WetTheCat{% endblock %}
 
-<head>
-      <meta charset="UTF-8">
-      <title>Register - WetTheCat</title>
-      <link rel="stylesheet" href="/static/css/styles.css">
-</head>
+{% block content %}
+<div class="form-container">
+      <h2>Register</h2>
+      <form id="register-form">
+            <label>
+                  <input type="text" id="username" name="username" placeholder="Username" required>
+            </label>
 
-<body>
-      <div class="container">
-            <h2>Register</h2>
-            <form id="register-form">
-                  <label for="username">Username:</label><br>
-                  <input type="text" id="username" name="username" required><br><br>
-                  <label for="email">Email:</label><br>
-                  <input type="email" id="email" name="email" required><br><br>
-                  <label for="password">Password:</label><br>
-                  <input type="password" id="password" name="password" required>
-                  <input type="checkbox" id="show-password"> Afficher le mot de passe<br><br>
-                  <label for="admin_password">Admin Password:</label><br>
-                  <input type="password" id="admin_password" name="admin_password" required>
-                  <input type="checkbox" id="show-admin-password"> Afficher le mot de passe admin<br><br>
+            <label>
+                  <input type="email" id="email" name="email" placeholder="Email" required>
+            </label>
 
-                  <button type="submit">Register</button>
-            </form>
-            <p>Déjà un compte ? <a href="/login">Connectez-vous ici</a>.</p>
-      </div>
-      <script>
-            document.getElementById('register-form').addEventListener('submit', async (e) => {
-                  e.preventDefault();
-                  const username = document.getElementById('username').value;
-                  const email = document.getElementById('email').value;
-                  const password = document.getElementById('password').value;
-                  const admin_password = document.getElementById('admin_password').value;
+            <label>
+                  <input type="password" id="password" name="password" placeholder="Mot de passe" required>
+                  <div class="password-icon">
+                        <i data-feather="eye" class="eye-icon"></i>
+                        <i data-feather="eye-off" class="eye-off-icon" style="display: none;"></i>
+                  </div>
+            </label>
 
+            <label>
+                  <input type="password" id="admin_password" name="admin_password" placeholder="Admin Password"
+                        required>
+                  <div class="password-icon">
+                        <i data-feather="eye" class="eye-icon"></i>
+                        <i data-feather="eye-off" class="eye-off-icon" style="display: none;"></i>
+                  </div>
+            </label>
+
+            <button type="submit" class="button">Register</button>
+      </form>
+      <p>Déjà un compte ? <a href="/login" class="button">Connectez-vous ici</a></p>
+
+      <!-- Conteneur pour les messages d'erreur -->
+      <div id="error-message" class="error-message"></div>
+</div>
+
+<!-- ICON SCRIPT -->
+<script src="https://unpkg.com/feather-icons"></script>
+<script>
+      feather.replace();
+
+      const passwordEye = document.querySelectorAll(".form-container .password-icon .eye-icon");
+      const passwordEyeOff = document.querySelectorAll(".form-container .password-icon .eye-off-icon");
+      const passwordFields = document.querySelectorAll(".form-container input[type=password]");
+
+      passwordEye.forEach((eye, index) => {
+            const eyeoff = passwordEyeOff[index];
+            const passwordField = passwordFields[index];
+
+            eye.addEventListener("click", () => {
+                  eye.style.display = "none";
+                  eyeoff.style.display = "block";
+
+                  passwordField.type = "text";
+            });
+
+            eyeoff.addEventListener("click", () => {
+                  eyeoff.style.display = "none";
+                  eye.style.display = "block";
+
+                  passwordField.type = "password";
+            });
+      });
+      // Gestionnaire de soumission du formulaire d'inscription
+      document.getElementById('register-form').addEventListener('submit', async (e) => {
+            e.preventDefault(); // Empêche le comportement par défaut du formulaire
+
+            // Masquer les messages d'erreur précédents
+            const errorDiv = document.getElementById('error-message');
+            errorDiv.classList.remove('visible');
+
+            // Récupérer les valeurs des champs
+            const username = document.getElementById('username').value.trim();
+            const email = document.getElementById('email').value.trim();
+            const password = document.getElementById('password').value;
+            const admin_password = document.getElementById('admin_password').value;
+
+            // Validation de base côté client
+            if (!username || !email || !password || !admin_password) {
+                  displayError('Veuillez remplir tous les champs.');
+                  return;
+            }
+
+            try {
                   const response = await fetch('/register', {
                         method: 'POST',
                         headers: {
@@ -49,36 +100,39 @@
                         })
                   });
 
+                  console.log('Réponse du serveur :', response);
+
+                  if (!response.ok) {
+                        // Tenter de récupérer les détails de l'erreur
+                        let errorData;
+                        try {
+                              errorData = await response.json();
+                        } catch (jsonError) {
+
+                              throw new Error('Réponse du serveur non valide.');
+                        }
+                        displayError(errorData.detail || 'Inscription échouée.');
+                        return;
+                  }
+
                   const data = await response.json();
-                  if (response.ok) {
-                        // Rediriger vers la page de login après l'inscription réussie
-                        alert('Registration OK!');
-                        window.location.href = '/login';
-                  } else {
-                        alert(data.detail || 'Registration failed');
-                  }
-            });
+                  console.log('Inscription réussie :', data);
+                  alert('Inscription réussie !');
+                  window.location.href = '/login';
+            } catch (error) {
+                  displayError('Une erreur est survenue lors de l\'inscription. Veuillez réessayer plus tard.');
+            }
+      });
 
-            // Fonctionnalité pour afficher/masquer le mot de passe
-            document.getElementById('show-password').addEventListener('change', function () {
-                  const passwordInput = document.getElementById('password');
-                  if (this.checked) {
-                        passwordInput.type = 'text';
-                  } else {
-                        passwordInput.type = 'password';
-                  }
-            });
-
-            // Fonctionnalité pour afficher/masquer le mot de passe admin
-            document.getElementById('show-admin-password').addEventListener('change', function () {
-                  const adminPasswordInput = document.getElementById('admin_password');
-                  if (this.checked) {
-                        adminPasswordInput.type = 'text';
-                  } else {
-                        adminPasswordInput.type = 'password';
-                  }
-            });
-      </script>
-</body>
-
-</html>
+      /**
+      * Fonction pour afficher les messages d'erreur
+      * @param {string} message - Le message d'erreur à afficher
+      */
+      function displayError(message) {
+            const errorDiv = document.getElementById('error-message');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+      }
+</script>
+{% endblock %}
+            

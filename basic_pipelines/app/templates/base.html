@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="fr">
+
+<head>
+      <meta charset="UTF-8">
+      <title>{% block title %}WetTheCat{% endblock %}</title>
+      <link rel="stylesheet" href="/static/css/styles.css">
+      {% block extra_head %}{% endblock %}
+</head>
+
+<body>
+      <!-- Bandeau de navigation -->
+      <nav class="navbar">
+            <div class="navbar-left">
+                  <a href="/" class="navbar-brand">WetTheCat</a>
+            </div>
+            <div class="navbar-right">
+                  {% if user %}
+                  <a href="/profile" class="navbar-user">{{ user.username }}</a>
+                  <button id="logout-button" class="navbar-button">Logout</button>
+                  {% else %}
+                  <a href="/login" class="navbar-button">Login</a>
+                  {% endif %}
+            </div>
+      </nav>
+
+      <!-- Contenu principal -->
+      <div class="content">
+            {% block content %}{% endblock %}
+      </div>
+
+      <!-- Script pour le bouton Logout -->
+      <script>
+            document.addEventListener('DOMContentLoaded', function () {
+                  const logoutButton = document.getElementById('logout-button');
+                  if (logoutButton) {
+                        logoutButton.addEventListener('click', async () => {
+                              // Envoyer une requête pour supprimer le cookie côté serveur
+                              await fetch('/logout', {
+                                    method: 'POST',
+                              });
+                              window.location.href = '/login';
+                        });
+                  }
+            });
+      </script>
+
+      {% block extra_scripts %}{% endblock %}
+</body>
+
+</html>

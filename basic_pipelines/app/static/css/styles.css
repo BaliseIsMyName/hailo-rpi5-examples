@@ -1,29 +1,270 @@
+/* Styles généraux */
 body {
       font-family: Arial, sans-serif;
       background-color: #f4f4f4;
       color: #333;
+      margin: 0;
+      padding: 0;
 }
 
 .container {
       text-align: center;
-      margin-top: 100px;
 }
 
-h1 {
+h1,
+h2 {
       font-size: 3em;
       margin-bottom: 20px;
 }
 
 .button {
       display: inline-block;
-      padding: 15px 30px;
+      padding: 15px 20px;
       font-size: 1.2em;
       color: #fff;
-      background-color: #007BFF;
+      background-color: #8492a1;
       text-decoration: none;
       border-radius: 5px;
+      margin: 5px;
 }
 
 .button:hover {
-      background-color: #0056b3;
+      background-color: #436a94;
+}
+
+/* Styles spécifiques à la page de streaming */
+body.stream-page {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      background-color: #222;
+      color: #fff;
+      flex-direction: column;
+}
+
+body.stream-page video {
+      max-width: 80%;
+      max-height: 80%;
+      border: 2px solid #fff;
+}
+
+/* Bandeau de navigation */
+.navbar {
+      width: 100%;
+      background-color: #333;
+      color: #fff;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 20px;
+      box-sizing: border-box;
+      border-bottom: 2px solid #555;
+      /* Ligne de délimitation */
+}
+
+.navbar a.navbar-brand {
+      font-size: 1.5em;
+      color: #fff;
+      text-decoration: none;
+}
+
+.navbar a.navbar-brand:hover {
+      color: #ddd;
+}
+
+.navbar-right {
+      display: flex;
+      align-items: center;
+}
+
+.navbar-button {
+      display: inline-block;
+      padding: 8px 16px;
+      font-size: 1.2em;
+      color: #fff;
+      background-color: #8492a1;
+      text-decoration: none;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      margin-left: 10px;
+}
+
+.navbar-button:hover {
+      background-color: #436a94;
+}
+
+/* Styles pour le lien du nom de l'utilisateur dans le navbar */
+.navbar-user {
+      color: #fff;
+      /* Couleur du texte */
+      text-decoration: none;
+      /* Pas de soulignement */
+      font-size: 1.5em;
+      /* Taille de police similaire aux autres éléments */
+      margin-right: 10px;
+      /* Espacement avec le bouton Logout */
+      cursor: pointer;
+      /* Curseur pointeur pour indiquer la possibilité de cliquer */
+      transition: color 0.3s ease;
+      /* Transition fluide pour le changement de couleur */
+}
+
+.navbar-user:hover {
+      color: #ddd;
+      /* Changement de couleur au survol */
+}
+
+/* Styles spécifiques aux formulaires */
+.form-container {
+      display: flex;
+      flex-wrap: wrap;
+      flex-direction: column;
+      align-content: flex-end;
+      color: #d6d6d6;
+      background-color: #000000;
+      padding: 40px;
+      border-radius: 10px;
+      box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+      width: 400px;
+      margin: 0 auto;
+      margin-top: 20px;
+}
+.form-container h2 {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      margin-right: 7px;
+      margin-top: 20px;
+}
+
+.form-container p {
+      display: flex;
+      flex-wrap: wrap;
+      align-self: flex-end;
+      align-items: center;
+      margin-top: -3px;
+      margin-right: 10px;
+}
+.form-container #login-form {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      padding: 10px;
+}
+.form-container #register-form {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      padding: 10px;
+}
+
+.form-container label {
+      position: relative;
+      margin-bottom: 0px;
+      margin-top : 0px;
+      padding: 10px 10px 10px 10px;
+      /* Ajuster le padding pour laisser de l'espace pour l'icône */
+      font-size: 1.2em;
+      color: #000000;
+}
+
+.form-container input[type="text"],
+.form-container input[type="email"],
+.form-container input[type="password"] {
+      display: flex;
+      flex-wrap: wrap;
+      width: 100%;
+      padding: 10px 0px 10px 10px;
+      /* Ajuster le padding pour laisser de l'espace pour l'icône */
+      font-size: 1.1em;
+      color: #000000;
+      background: #dad9d9;
+      border: 2px solid #7a7a7a;
+      border-radius: 5px;
+      transition: all 0.2s;
+}
+
+.form-container input[type="text"]:focus,
+.form-container input[type="email"]:focus,
+.form-container input[type="password"]:focus {
+      border-color: #ff4754;
+}
+
+.form-container .password-icon {
+      display: flex;
+      align-items: center;
+      position: absolute;
+      top: 50%;
+      right: 5px;
+      transform: translateY(-50%);
+      color: #000000;
+      cursor: pointer;
+      transition: color 0.3s ease;
+}
+
+.form-container .password-icon:hover {
+      color: #ff4754;
+}
+
+.form-container .button {
+      padding: 10px 20px;
+      font-size: 1.2em;
+      color: #fff;
+      background-color: #8492a1;
+      border: 2px solid #7a7a7a;
+      border-radius: 5px;
+      cursor: pointer;
+      margin-top: 5px;
+      margin-right: -3px;
+}
+.form-container .button:hover {
+      background-color: #436a94;
+}
+.back-link,
+.logout-button {
+      margin-top: 20px;
+      color: #fff;
+      text-decoration: none;
+      background-color: #555;
+      padding: 10px 20px;
+      border-radius: 5px;
+      cursor: pointer;
+      border: none;
+      font-size: 16px;
+      margin-left: 10px;
+}
+
+.back-link:hover,
+.logout-button:hover {
+      background-color: #777;
+}
+
+/* Autres styles */
+video {
+      max-width: 100%;
+      height: auto;
+}
+
+/* Styles pour le profil */
+#profile-info p {
+      font-size: 1.2em;
+      margin-bottom: 10px;
+      color: #000000;
+}
+
+/* Styles pour les messages d'erreur */
+.error-message {
+      display: none;
+      /* Masqué par défaut */
+      color: #ff4754;
+      /* Couleur rouge */
+      font-size: 1em;
+      text-align: center;
+      width: 100%;
+}
+
+.error-message.visible {
+      display: block;
 }
