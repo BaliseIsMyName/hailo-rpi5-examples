@@ -166,3 +166,6 @@ passtext.txt
 # alembic
 basic_pipeline/alembic.ini
 *.ini
+
+# gst data
+basic_pipelines/gstshark*
