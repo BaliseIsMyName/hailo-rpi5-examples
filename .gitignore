@@ -164,4 +164,5 @@ resources/*.so
 passtext.txt
 
 # alembic
-hailo-rpi5-examples/alembic.ini
+hailo-rpi5-examples/basic_pipeline/alembic.ini
+*.ini
