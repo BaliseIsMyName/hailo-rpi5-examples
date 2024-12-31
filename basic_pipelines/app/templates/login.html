@@ -7,11 +7,11 @@
       <h2>Login</h2>
       <form id="login-form">
             <label>
-                  <input type="text" id="username" name="username" placeholder="Username or Email" required>
+                  <input type="text" id="username" name="username" placeholder="Username or Email" required autocomplete="on">
             </label>
 
             <label>
-                  <input type="password" id="password" name="password" placeholder="Mot de passe" required>
+                  <input type="password" id="password" name="password" placeholder="Mot de passe" required >
                   <div class="password-icon">
                         <i data-feather="eye" class="eye-icon"></i>
                         <i data-feather="eye-off" class="eye-off-icon" style="display: none;"></i>
@@ -106,6 +106,12 @@
             const errorDiv = document.getElementById('error-message');
             errorDiv.textContent = message;
             errorDiv.style.display = 'block';
+
+            // Masquer le message après 5 secondes
+            setTimeout(() => {
+                  errorDiv.style.display = 'none';
+                  errorDiv.textContent = '';
+            }, 2000);
       }
 </script>
 {% endblock %}

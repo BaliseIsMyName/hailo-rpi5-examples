@@ -181,7 +181,7 @@ body.stream-page video {
       font-size: 1.1em;
       color: #000000;
       background: #dad9d9;
-      border: 2px solid #7a7a7a;
+      /* border: 2px solid #7a7a7a; */
       border-radius: 5px;
       transition: all 0.2s;
 }
@@ -267,4 +267,8 @@ video {
 
 .error-message.visible {
       display: block;
+}
+
+.input-error {
+      border-color: #e74c3c;
 }

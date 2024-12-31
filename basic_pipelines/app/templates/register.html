@@ -7,11 +7,11 @@
       <h2>Register</h2>
       <form id="register-form">
             <label>
-                  <input type="text" id="username" name="username" placeholder="Username" required>
+                  <input type="text" id="username" name="username" placeholder="Username" required autocomplete="on" >
             </label>
 
             <label>
-                  <input type="email" id="email" name="email" placeholder="Email" required>
+                  <input type="email" id="email" name="email" placeholder="Email" required autocomplete="on" >
             </label>
 
             <label>
@@ -85,6 +85,23 @@
                   displayError('Veuillez remplir tous les champs.');
                   return;
             }
+            // Ajouter avant l'envoi des données
+            const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            if (!emailPattern.test(email)) {
+                  displayError('Veuillez saisir un email valide.');
+                  document.getElementById('email').classList.add('input-error');
+                  return;
+            } else {
+                  document.getElementById('email').classList.remove('input-error');
+            }
+
+            if (password.length < 2) {
+                  displayError('Le mot de passe doit contenir au moins 2 caractères.');
+                  document.getElementById('password').classList.add('input-error');
+                  return;
+            } else {
+                  document.getElementById('password').classList.remove('input-error');
+            }
 
             try {
                   const response = await fetch('/register', {
@@ -113,14 +130,17 @@
                         }
                         displayError(errorData.detail || 'Inscription échouée.');
                         return;
-                  }
+                  } 
 
                   const data = await response.json();
                   console.log('Inscription réussie :', data);
+                  document.getElementById('admin_password').classList.remove('input-error');
                   alert('Inscription réussie !');
                   window.location.href = '/login';
             } catch (error) {
-                  displayError('Une erreur est survenue lors de l\'inscription. Veuillez réessayer plus tard.');
+                  displayError('Le mot de passe admin est incorrect');
+                  document.getElementById('admin_password').classList.add('input-error');
+                  
             }
       });
 
@@ -132,6 +152,12 @@
             const errorDiv = document.getElementById('error-message');
             errorDiv.textContent = message;
             errorDiv.style.display = 'block';
+
+            // Masquer le message après 5 secondes
+            setTimeout(() => {
+                  errorDiv.style.display = 'none';
+                  errorDiv.textContent = '';
+            }, 2000);
       }
 </script>
 {% endblock %}
