@@ -181,7 +181,7 @@ class CameraDeplacement:
         self.vertical_max_angle = vertical_max_angle
 
     def select_best_detection(self, detections):
-        best_confidence = 0.0
+        best_confidence = 0.6
         best_det = None
         cat_detected = False
 

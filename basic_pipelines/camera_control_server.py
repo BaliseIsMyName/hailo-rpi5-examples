@@ -109,7 +109,7 @@ class CameraControlServer:
         On récupère (x_center, y_center) et on les envoie au PID.
         """
         label = detection.get("label", "unknown")
-        conf = detection.get("confidence", 0.0)
+        conf = detection.get("confidence", 0.6)
         x = detection.get("x_center", 0.5)  # Valeur par défaut = centre
         y = detection.get("y_center", 0.5)
 

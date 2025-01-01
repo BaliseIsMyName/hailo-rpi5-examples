@@ -44,7 +44,8 @@ class user_app_callback_class(app_callback_class):
         self.height = None
         self.barycentre_x = None
         self.barycentre_y = None
-
+        self.detection_event = threading.Event()  # Événement pour signaler les détections
+        self.lock = threading.Lock()  # Pour synchroniser l'accès aux détections
 # -----------------------------
 # Callbacks GStreamer
 # -----------------------------
@@ -58,10 +59,14 @@ def app_callback(pad, info, user_data):
         user_data.width = width
         user_data.height = height
 
-    # RÃ©cupÃ©ration des dÃ©tections via Hailo
+    # Récupération des détections via Hailo
     roi = hailo.get_roi_from_buffer(buffer)
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
     user_data.last_detections = detections
+        
+    # Signaler qu'une nouvelle détection est disponible
+    if detections:
+        user_data.detection_event.set()
         
     return Gst.PadProbeReturn.OK
 
@@ -118,58 +123,146 @@ def draw_overlay(cairooverlay, cr, timestamp, duration, user_data):
 # -----------------------------
 class UnixDomainSocketSender:
     """
-    Gère la connexion à un socket Unix local et l'envoi d'un seul message
-    (type dict) à la fois.
+    Gère la connexion à un socket Unix local et l'envoi de messages de détection
+    uniquement lorsque le service est actif. Intègre la logique d'envoi pour limiter
+    la fréquence et éviter les charges CPU excessives.
     """
-    def __init__(self, socket_path=SOCKET_PATH):
+    def __init__(self, socket_path=SOCKET_PATH, service_name='cameracontrol.service', user_data=None):
         self.socket_path = socket_path
+        self.service_name = service_name
+        self.user_data = user_data
+
         self.sock = None
         self.connected = False
         self._stop = False
         self.lock = threading.Lock()  # Pour gérer l'accès concurrent à self.sock
-        
+
+        self.detection_event = threading.Event()
+
     def start(self):
-        """Essaye de se connecter au socket. Peut être relancé si le serveur n'est pas prêt."""
-        self.thread = threading.Thread(target=self._connect_loop, daemon=True)
-        self.thread.start()
+        """Démarre les threads de vérification de service et de traitement des détections."""
+        self.service_thread = threading.Thread(target=self._service_monitor_loop, daemon=True)
+        self.service_thread.start()
+
+        self.process_thread = threading.Thread(target=self._process_detections, daemon=True)
+        self.process_thread.start()
 
     def stop(self):
-        """Arrête le thread de connexion et ferme la socket."""
+        """Arrête les threads et ferme la socket."""
         self._stop = True
+        self.detection_event.set()  # Débloquer la queue si en attente
         with self.lock:
             if self.sock:
                 self.sock.close()
-        if self.thread.is_alive():
-            self.thread.join()
+        if self.service_thread.is_alive():
+            self.service_thread.join()
+        if self.process_thread.is_alive():
+            self.process_thread.join()
 
-    def _connect_loop(self):
+    def _service_monitor_loop(self):
+        """Vérifie l'état du service toutes les 10 secondes et gère la connexion."""
         while not self._stop:
-            if not self.connected:
-                try:
-                    with self.lock:
-                        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                        self.sock.connect(self.socket_path)
-                    self.connected = True
-                    print("[UnixDomainSocketSender] Connecté au serveur camera.")
-                except socket.error as e:
-                    print(f"[UnixDomainSocketSender] Erreur de connexion : {e}. Retry dans 2s...")
-                    time.sleep(2)
-                    continue  # Recommencer la boucle pour tenter de se reconnecter
+            if self._is_service_active():
+                if not self.connected:
+                    self._connect()
+            else:
+                if self.connected:
+                    self._disconnect()
+            time.sleep(10)  # Intervalle de vérification de l'état du service
 
-            # Vérifier si la connexion est toujours active
-            try:
-                # Envoyer un ping ou vérifier la socket
-                self.sock.sendall(b'')  # Envoi d'une chaîne vide pour vérifier la connexion
-            except socket.error:
-                print("[UnixDomainSocketSender] Déconnecté du serveur camera.")
-                self.connected = False
-                with self.lock:
-                    self.sock.close()
-                time.sleep(2)  # Attendre avant de tenter de se reconnecter
+    def _is_service_active(self):
+        """
+        Vérifie si le service systemd utilisateur est actif.
+        
+        Returns:
+            bool: True si le service est actif, False sinon.
+        """
+        try:
+            result = subprocess.run(
+                ['systemctl', '--user', 'is-active', self.service_name],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+                text=True
+            )
+            is_active = result.stdout.strip() == 'active'
+            if is_active:
+                print(f"[UnixDomainSocketSender] Service {self.service_name} est actif.")
+            else:
+                print(f"[UnixDomainSocketSender] Service {self.service_name} n'est pas actif.")
+            return is_active
+        except subprocess.CalledProcessError:
+            print(f"[UnixDomainSocketSender] Service {self.service_name} n'est pas actif (appel systemctl échoué).")
+            return False
 
-            time.sleep(1)  # Intervalle avant la prochaine vérification
+    def _connect(self):
+        """Tente de se connecter au socket Unix."""
+        try:
+            with self.lock:
+                self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                self.sock.connect(self.socket_path)
+            self.connected = True
+            print("[UnixDomainSocketSender] Connecté au serveur camera.")
+        except socket.error as e:
+            # print(f"[UnixDomainSocketSender] Erreur de connexion : {e}. Retry dans 10s...")
+            self.connected = False
+            if self.sock:
+                self.sock.close()
+                self.sock = None
 
-    def send_detection(self, detection: dict):
+    def _disconnect(self):
+        """Déconnecte le socket Unix."""
+        with self.lock:
+            if self.sock:
+                self.sock.close()
+                self.sock = None
+        self.connected = False
+        print("[UnixDomainSocketSender] Déconnecté du serveur camera.")
+
+    def _process_detections(self):
+        """Traite et envoie les détections."""
+        while not self._stop:
+            # Attendre qu'une nouvelle détection soit disponible ou un timeout
+            self.detection_event.wait(timeout=0.1)
+            self.detection_event.clear()
+
+            if self._stop:
+                break
+
+            detections_to_send = []
+            with self.user_data.lock:
+                detections = list(self.user_data.last_detections)  # Copie sécurisée
+
+            # Filtrer les détections selon le seuil et les objets suivis
+            for det in detections:
+                label = det.get_label()
+                confidence = det.get_confidence()
+                if label in TRACK_OBJECTS and confidence >= 0.5:
+                    barycentre_x = self.user_data.barycentre_x
+                    barycentre_y = self.user_data.barycentre_y
+                    if barycentre_x is not None and barycentre_y is not None:
+                        detection_msg = {
+                            "label": label,
+                            "confidence": confidence,
+                            "x_center": barycentre_x,
+                            "y_center": barycentre_y
+                        }
+                        detections_to_send.append(detection_msg)
+
+            # Envoyer toutes les détections filtrées
+            for detection in detections_to_send:
+                self._send_detection(detection)
+
+    def queue_detection(self, detection: dict):
+        """Déclenche l'envoi des détections en signalant l'événement."""
+        self.detection_event.set()
+
+    def _send_detection(self, detection: dict):
+        """Envoie une détection si connecté et service actif."""
+        if not self.connected:
+            # Ne pas envoyer si non connecté
+            return
+        
         """
         Envoie un dict JSON représentant la détection:
         {
@@ -179,10 +272,6 @@ class UnixDomainSocketSender:
           "y_center": <float, 0..1>
         }
         """
-        if not self.connected or not self.sock:
-            print("[UnixDomainSocketSender] Non connecté. Détection non envoyée.")
-            return
-
         try:
             message = json.dumps(detection) + "\n"
             with self.lock:
@@ -190,10 +279,8 @@ class UnixDomainSocketSender:
             print(f"[UnixDomainSocketSender] Détection envoyée: {detection}")
         except socket.error as e:
             print(f"[UnixDomainSocketSender] Erreur d'envoi : {e}")
-            self.connected = False
-            with self.lock:
-                self.sock.close()
-            # La connexion sera réessayée dans le _connect_loop
+            self._disconnect()
+
 
 # -----------------------------déplacement de la fenêtre dans le coin en haut à droite de l'écran -----------------------------
 def move_window():
@@ -224,43 +311,12 @@ if __name__ == "__main__":
     # 2. CrÃ©ation de l'application GStreamer
     app = GStreamerInstanceSegmentationApp(app_callback, user_data)
 
-    # 3. CrÃ©ation du Sender (Unix domain socket)
-    sender = UnixDomainSocketSender(SOCKET_PATH)
+    # 3. Création du Sender (Unix domain socket)
+    sender = UnixDomainSocketSender(SOCKET_PATH,
+                                    service_name='cameracontrol.service', user_data=user_data)
     sender.start()
 
-    # 4. Lancement d'un thread qui choisit la dÃ©tection la plus confiante
-    def send_loop():
-        while True:
-            try:
-                best_confidence = 0.0
-                best_det = None
-                if user_data.last_detections:
-                    for det in user_data.last_detections:
-                        label = det.get_label()
-                        if label not in TRACK_OBJECTS:
-                            continue
-                        confidence = det.get_confidence()
-                        if confidence > best_confidence:
-                            best_confidence = confidence
-                            best_det = det
-
-                if best_det and user_data.barycentre_x is not None and user_data.barycentre_y is not None:
-                    detection_msg = {
-                        "label": best_det.get_label(),
-                        "confidence": best_confidence,
-                        "x_center": user_data.barycentre_x,
-                        "y_center": user_data.barycentre_y
-                    }
-                    sender.send_detection(detection_msg)
-            except Exception as e:
-                print(f"[send_loop] Erreur lors de l'envoi des données : {e}")
-
-            time.sleep(0.1)  # 10 fois par seconde
-
-    t = threading.Thread(target=send_loop, daemon=True)
-    t.start()
-
-    # 5. On rÃ©cupÃ¨re le cairo overlay pour dessiner
+    # 5. On récupère le cairo overlay pour dessiner
     cairo_overlay = app.pipeline.get_by_name("cairo_overlay")
     if cairo_overlay is None:
         print("Erreur : cairo_overlay non trouvé dans le pipeline.")
