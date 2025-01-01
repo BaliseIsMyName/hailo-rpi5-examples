@@ -5,6 +5,8 @@ import os
 import socket
 import json
 import threading
+import time 
+import signal
 
 from camera_deplacement import CameraDeplacement  # <-- on importe notre classe
 
@@ -77,7 +79,8 @@ class CameraControlServer:
                 if self._stop:
                     print("[CameraControlServer] Arrêt du serveur.")
                 else:
-                    raise
+                    print("[CameraControlServer] Erreur de socket. Tentative suivante.")
+                    time.sleep(1)  # Attendre avant de réessayer
 
     def _handle_client(self, client_sock):
         """Lit les messages JSON ligne par ligne et agit."""
@@ -158,13 +161,27 @@ class BBox:
     def ymax(self):
         return self.y_center + 0.05
 
+def signal_handler(signum, frame):
+    print(f"[CameraControlServer] Signal {signum} reçu, arrêt du serveur.")
+    server.stop()
+    exit(0)
+    
 
 def main():
+    global server
     server = CameraControlServer()
     server.start()
+    
+        # Enregistrer les gestionnaires de signaux
+    signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
+    signal.signal(signal.SIGTERM, signal_handler)  # Termination par le service
+    
+    
     try:
         # On attend indéfiniment (Ctrl+C pour arrÃªter)
-        server.thread.join()
+        # server.thread.join()
+        while True:
+            time.sleep(1)
     except KeyboardInterrupt:
         pass
     finally:

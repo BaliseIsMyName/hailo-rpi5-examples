@@ -118,47 +118,60 @@ def draw_overlay(cairooverlay, cr, timestamp, duration, user_data):
 # -----------------------------
 class UnixDomainSocketSender:
     """
-    GÃ¨re la connexion Ã  un socket Unix local et l'envoi d'un seul message
-    (type dict) Ã  la fois.
+    Gère la connexion à un socket Unix local et l'envoi d'un seul message
+    (type dict) à la fois.
     """
     def __init__(self, socket_path=SOCKET_PATH):
         self.socket_path = socket_path
         self.sock = None
         self.connected = False
         self._stop = False
-
+        self.lock = threading.Lock()  # Pour gérer l'accès concurrent à self.sock
+        
     def start(self):
-        """Essaye de se connecter au socket. Peut Ãªtre relancÃ© si le serveur n'est pas prÃªt."""
+        """Essaye de se connecter au socket. Peut être relancé si le serveur n'est pas prêt."""
         self.thread = threading.Thread(target=self._connect_loop, daemon=True)
         self.thread.start()
 
     def stop(self):
+        """Arrête le thread de connexion et ferme la socket."""
         self._stop = True
-        if self.sock:
-            self.sock.close()
+        with self.lock:
+            if self.sock:
+                self.sock.close()
         if self.thread.is_alive():
             self.thread.join()
 
     def _connect_loop(self):
         while not self._stop:
-            try:
-                self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                self.sock.connect(self.socket_path)
-                self.connected = True
-                print("[UnixDomainSocketSender] ConnectÃ© au serveur camera.")
-                break
-            except socket.error as e:
-                print(f"[UnixDomainSocketSender] Erreur de connexion : {e}. Retry dans 2s...")
-                time.sleep(2)
+            if not self.connected:
+                try:
+                    with self.lock:
+                        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                        self.sock.connect(self.socket_path)
+                    self.connected = True
+                    print("[UnixDomainSocketSender] Connecté au serveur camera.")
+                except socket.error as e:
+                    print(f"[UnixDomainSocketSender] Erreur de connexion : {e}. Retry dans 2s...")
+                    time.sleep(2)
+                    continue  # Recommencer la boucle pour tenter de se reconnecter
 
-        # On boucle tant qu'on n'est pas stoppÃ©
-        while not self._stop and self.connected:
-            time.sleep(0.5)
-        print("[UnixDomainSocketSender] Fin du _connect_loop.")
+            # Vérifier si la connexion est toujours active
+            try:
+                # Envoyer un ping ou vérifier la socket
+                self.sock.sendall(b'')  # Envoi d'une chaîne vide pour vérifier la connexion
+            except socket.error:
+                print("[UnixDomainSocketSender] Déconnecté du serveur camera.")
+                self.connected = False
+                with self.lock:
+                    self.sock.close()
+                time.sleep(2)  # Attendre avant de tenter de se reconnecter
+
+            time.sleep(1)  # Intervalle avant la prochaine vérification
 
     def send_detection(self, detection: dict):
         """
-        Envoie un dict JSON reprÃ©sentant la dÃ©tection:
+        Envoie un dict JSON représentant la détection:
         {
           "label": "person" ou "cat",
           "confidence": <float>,
@@ -167,17 +180,20 @@ class UnixDomainSocketSender:
         }
         """
         if not self.connected or not self.sock:
+            print("[UnixDomainSocketSender] Non connecté. Détection non envoyée.")
             return
 
         try:
             message = json.dumps(detection) + "\n"
-            self.sock.sendall(message.encode("utf-8"))
+            with self.lock:
+                self.sock.sendall(message.encode("utf-8"))
+            print(f"[UnixDomainSocketSender] Détection envoyée: {detection}")
         except socket.error as e:
             print(f"[UnixDomainSocketSender] Erreur d'envoi : {e}")
             self.connected = False
-            if self.sock:
+            with self.lock:
                 self.sock.close()
-            # On pourrait relancer _connect_loop() pour tenter de se reconnecter.
+            # La connexion sera réessayée dans le _connect_loop
 
 # -----------------------------déplacement de la fenêtre dans le coin en haut à droite de l'écran -----------------------------
 def move_window():
@@ -215,29 +231,29 @@ if __name__ == "__main__":
     # 4. Lancement d'un thread qui choisit la dÃ©tection la plus confiante
     def send_loop():
         while True:
-            best_confidence = 0.0
-            best_det = None
-            if user_data.last_detections:
-                for det in user_data.last_detections:
-                    label = det.get_label()
-                    if label not in TRACK_OBJECTS:
-                        continue
-                    # On suppose qu'il existe une mÃ©thode get_confidence() ou get_score()
-                    # Ã  adapter selon l'API Hailo
-                    confidence = det.get_confidence()
-                    if confidence > best_confidence:
-                        best_confidence = confidence
-                        best_det = det
+            try:
+                best_confidence = 0.0
+                best_det = None
+                if user_data.last_detections:
+                    for det in user_data.last_detections:
+                        label = det.get_label()
+                        if label not in TRACK_OBJECTS:
+                            continue
+                        confidence = det.get_confidence()
+                        if confidence > best_confidence:
+                            best_confidence = confidence
+                            best_det = det
 
-            # Si on a un best_det, on envoie
-            if best_det and user_data.barycentre_x is not None and user_data.barycentre_y is not None:
-                detection_msg = {
-                    "label": best_det.get_label(),
-                    "confidence": best_confidence,
-                    "x_center": user_data.barycentre_x,
-                    "y_center": user_data.barycentre_y
-                }
-                sender.send_detection(detection_msg)
+                if best_det and user_data.barycentre_x is not None and user_data.barycentre_y is not None:
+                    detection_msg = {
+                        "label": best_det.get_label(),
+                        "confidence": best_confidence,
+                        "x_center": user_data.barycentre_x,
+                        "y_center": user_data.barycentre_y
+                    }
+                    sender.send_detection(detection_msg)
+            except Exception as e:
+                print(f"[send_loop] Erreur lors de l'envoi des données : {e}")
 
             time.sleep(0.1)  # 10 fois par seconde
 
