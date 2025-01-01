@@ -21,6 +21,9 @@ from hailo_rpi_common import (
     detect_hailo_arch,
 )
 
+# Set the process title
+setproctitle.setproctitle("Hailo Detection App")
+
 class GStreamerInstanceSegmentationApp(GStreamerApp):
     def __init__(self, app_callback, user_data):
         parser = get_default_parser()
@@ -78,7 +81,7 @@ class GStreamerInstanceSegmentationApp(GStreamerApp):
         )
         user_callback_pipeline = USER_CALLBACK_PIPELINE()
 
-        # On insÃ¨re videoconvert avant cairooverlay pour assurer un format compatible
+        # On insère videoconvert avant cairooverlay pour assurer un format compatible
         # On garde fpsdisplaysink pour l'affichage final
         pipeline_string = (
             f'{source_pipeline} '
@@ -93,12 +96,12 @@ class GStreamerInstanceSegmentationApp(GStreamerApp):
             # cairooverlay
             f'{QUEUE("cairo_q")} ! '
             f'cairooverlay name=cairo_overlay ! '
-            # videoconvert aprÃ¨s cairooverlay
+            # videoconvert après cairooverlay
             f'{QUEUE("hailo_display_videoconvert_q")} ! '
             f'videoconvert name=hailo_display_videoconvert n-threads=2 qos=false ! '
             # Ajout du tee
             f'tee name=t '
-            # Branche pour l'affichage local
+            # # Branche pour l'affichage local
             f't. ! queue ! '
             f'fpsdisplaysink name=hailo_display video-sink={self.video_sink} sync={self.sync} text-overlay={self.show_fps} signal-fps-measurements=true '
             # Branche pour le streaming RTMP
@@ -106,9 +109,6 @@ class GStreamerInstanceSegmentationApp(GStreamerApp):
             f'x264enc tune=zerolatency bitrate=1200 speed-preset=superfast ! '
             f'flvmux streamable=true ! '
             f'rtmpsink location="rtmp://localhost/live/stream live=1" '
-            # # fpsdisplaysink pour l'affichage final
-            # f'{QUEUE("hailo_display_q")} ! '
-            # f'fpsdisplaysink name=hailo_display video-sink={self.video_sink} sync={self.sync} text-overlay={self.show_fps} signal-fps-measurements=true '
         )
         print(pipeline_string)
         return pipeline_string

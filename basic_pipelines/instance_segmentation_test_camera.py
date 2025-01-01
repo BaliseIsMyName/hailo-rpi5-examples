@@ -13,6 +13,8 @@ import time
 import hailo
 import numpy as np
 import matplotlib.pyplot as plt
+import subprocess
+
 
 from hailo_rpi_common import (
     get_caps_from_pad,
@@ -177,6 +179,23 @@ class UnixDomainSocketSender:
                 self.sock.close()
             # On pourrait relancer _connect_loop() pour tenter de se reconnecter.
 
+# -----------------------------déplacement de la fenêtre dans le coin en haut à droite de l'écran -----------------------------
+def move_window():
+    while True:
+        try:
+            window_ids = subprocess.check_output(['xdotool', 'search', '--name', 'Hailo Detection App']).decode().strip().split('\n')
+            if window_ids:
+                window_id = window_ids[0]
+                subprocess.run(['xdotool', 'windowmove', window_id, '440', '62'])
+                print(f"Fenêtre déplacée : ID {window_id} vers (440, 62)")
+                break  # Terminer le thread après déplacement
+            else:
+                print("Fenêtre 'Hailo Detection App' non trouvée, tentative suivante...")
+        except subprocess.CalledProcessError:
+            print("Erreur lors de la recherche de la fenêtre 'Hailo Detection App', tentative suivante...")
+        time.sleep(1)
+
+
 # -----------------------------
 # MAIN
 # -----------------------------
@@ -228,11 +247,15 @@ if __name__ == "__main__":
     # 5. On rÃ©cupÃ¨re le cairo overlay pour dessiner
     cairo_overlay = app.pipeline.get_by_name("cairo_overlay")
     if cairo_overlay is None:
-        print("Erreur : cairo_overlay non trouvÃ© dans le pipeline.")
+        print("Erreur : cairo_overlay non trouvé dans le pipeline.")
         exit(1)
 
     cairo_overlay.connect("draw", draw_overlay, user_data)
 
+        # Lancer un thread pour déplacer la fenêtre vidéo
+    window_mover_thread = threading.Thread(target=move_window, daemon=True)
+    window_mover_thread.start()
+    
     # 6. Lancement de l'appli GStreamer
     try:
         app.run()
