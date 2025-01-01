@@ -46,6 +46,7 @@ class user_app_callback_class(app_callback_class):
         self.barycentre_y = None
         self.detection_event = threading.Event()  # Événement pour signaler les détections
         self.lock = threading.Lock()  # Pour synchroniser l'accès aux détections
+        self.dead_zone = 0.05 # Zone morte (5%)
 # -----------------------------
 # Callbacks GStreamer
 # -----------------------------
@@ -77,10 +78,14 @@ def draw_overlay(cairooverlay, cr, timestamp, duration, user_data):
     width = user_data.width
     height = user_data.height
 
-    # Dessiner un point bleu au centre de la vidÃ©o
+    # Calculer le rayon basé sur la zone morte
+    min_dimension = min(width, height)
+    radius = user_data.dead_zone * min_dimension
+
+    # Dessiner un cercle bleu représentant la zone morte au centre de la vidéo
     cr.set_source_rgb(0, 0, 1)  # Bleu
-    cr.arc(width / 2, height / 2, 5, 0, 2 * 3.14159)
-    cr.fill()
+    cr.arc(width / 2, height / 2, radius, 0, 2 * 3.14159)
+    cr.stroke()  # Utiliser stroke pour dessiner le contour du cercle
 
     # Dessiner un point rouge au barycentre de chaque masque de dÃ©tection
     cr.set_source_rgb(1, 0, 0)  # Rouge
@@ -105,12 +110,12 @@ def draw_overlay(cairooverlay, cr, timestamp, duration, user_data):
                 barycentre_x = int(np.sum(x_indices * data[y_indices, x_indices]) / total_weight)
                 barycentre_y = int(np.sum(y_indices * data[y_indices, x_indices]) / total_weight)
 
-                # Convertir les coordonnÃ©es du barycentre en coordonnÃ©es de l'image
+                # Convertir les coordonnées du barycentre en coordonnées de l'image
                 x_min, y_min = int(bbox.xmin() * width), int(bbox.ymin() * height)
                 barycentre_x = x_min + barycentre_x * 4
                 barycentre_y = y_min + barycentre_y * 4
 
-                # Stocker les coordonnÃ©es du barycentre dans user_data
+                # Stocker les coordonnées du barycentre dans user_data
                 user_data.barycentre_x = barycentre_x / width
                 user_data.barycentre_y = barycentre_y / height
                 

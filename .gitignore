@@ -171,4 +171,4 @@ basic_pipeline/alembic.ini
 basic_pipelines/gstshark*
 
 #note perso
-basic_pipelines/note.txt
+basic_pipelines/note.md
