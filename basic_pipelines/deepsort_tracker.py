@@ -15,11 +15,11 @@ class Track:
             [0, 0, 1, 0, 0, 0, 0],
             [0, 0, 0, 1, 0, 0, 0]
         ])
-        self.kf.R[2:, 2:] *= 5.  # Increase measurement noise covariance
+        self.kf.R[2:, 2:] *= 2.  # Decrease measurement noise covariance
         self.kf.P[4:, 4:] *= 1000.
         self.kf.P *= 10.
-        self.kf.Q[-1, -1] *= 0.1  # Increase process noise covariance
-        self.kf.Q[4:, 4:] *= 0.1  # Increase process noise covariance
+        self.kf.Q[-1, -1] *= 0.5  # Increase process noise covariance
+        self.kf.Q[4:, 4:] *= 0.5  # Increase process noise covariance
         self.age = 0
         self.time_since_update = 0
         self.hits = 0
