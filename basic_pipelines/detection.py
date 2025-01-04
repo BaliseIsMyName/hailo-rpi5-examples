@@ -11,6 +11,7 @@ import time
 import subprocess
 import socket
 import json
+import cairo
 
 # Imports PCA9685 & co
 import board
@@ -23,6 +24,7 @@ from hailo_rpi_common import (
     app_callback_class,
 )
 from detection_pipeline import GStreamerDetectionApp
+from deepsort_tracker import DeepSORTTracker  # Importing the DeepSORT tracker
 
 # =============================
 # ========= CONSTANTES ========
@@ -45,12 +47,8 @@ class user_app_callback_class(app_callback_class):
         # Centres courants (bruts) de toutes les bbox
         self.bbox_centers = []
 
-        # === KALMAN FILTER ===
-        # Centre filtré (x, y) après Kalman
-        self.kalman_filtered_center = (0.5, 0.5)  # Au départ, centre image
-
-        # Filtre 2D: position + vitesse
-        self.kalman_filter = KalmanFilter2D()
+        # === DEEPSORT TRACKER ===
+        self.tracker = DeepSORTTracker()  # Initialize the DeepSORT tracker
         
         self.current_fps = 0.0
         self.current_droprate = 0.0
@@ -60,88 +58,6 @@ class user_app_callback_class(app_callback_class):
         self.lock = threading.Lock()
 
         self.dead_zone = DEAD_ZONE
-
-
-# === KALMAN FILTER ===
-class KalmanFilter2D:
-    """
-    Filtre de Kalman simplifié en 2D :
-    État : [x, y, vx, vy]
-    Mesure : [x, y]
-    """
-
-    def __init__(self, dt=1/25):
-        """
-        dt : intervalle de temps (approx. 1/fps).
-        """
-        self.dt = dt
-
-        # État : [x, y, vx, vy] (4x1)
-        self.x = np.zeros((4, 1), dtype=np.float32)
-
-        # Matrice de transition (F)
-        # [ x ]   [ 1  0  dt  0 ] [ x ]
-        # [ y ] = [ 0  1   0  dt ] [ y ]
-        # [vx ]   [ 0  0   1   0 ] [vx ]
-        # [vy ]   [ 0  0   0   1 ] [vy ]
-        self.F = np.array([
-            [1, 0, self.dt,      0],
-            [0, 1,      0, self.dt],
-            [0, 0,      1,      0],
-            [0, 0,      0,      1]
-        ], dtype=np.float32)
-
-        # Matrice d’observation (H)
-        # On observe seulement x et y
-        self.H = np.array([
-            [1, 0, 0, 0],
-            [0, 1, 0, 0]
-        ], dtype=np.float32)
-
-        # Incertitude du modèle (Q) et bruit de mesure (R)
-        # À ajuster selon la fluidité / réactivité souhaitée
-        self.Q = np.eye(4, dtype=np.float32) * 0.001
-        self.R = np.eye(2, dtype=np.float32) * 0.01
-
-        # Matrices de covariance (P)
-        self.P = np.eye(4, dtype=np.float32)
-
-    def predict(self):
-        """
-        Étape de prédiction : x(k) = F * x(k-1)
-        """
-        self.x = np.dot(self.F, self.x)
-        self.P = np.dot(np.dot(self.F, self.P), self.F.T) + self.Q
-
-    def update(self, z):
-        """
-        Étape de mise à jour (z = [x_mesure, y_mesure]).
-        """
-        z = np.array(z, dtype=np.float32).reshape((2, 1))
-        # Innovation = z - Hx
-        y = z - np.dot(self.H, self.x)
-        # S = H P H^T + R
-        S = np.dot(np.dot(self.H, self.P), self.H.T) + self.R
-        # K = P H^T S^(-1)
-        K = np.dot(np.dot(self.P, self.H.T), np.linalg.inv(S))
-        # x_new = x + K y
-        self.x = self.x + np.dot(K, y)
-        # P_new = (I - K H) P
-        I = np.eye(self.P.shape[0], dtype=np.float32)
-        self.P = np.dot((I - np.dot(K, self.H)), self.P)
-
-    def get_estimated_position(self):
-        """
-        Retourne (x, y) du vecteur d'état courant.
-        """
-        return float(self.x[0]), float(self.x[1])
-
-    def set_initial_position(self, x, y):
-        """
-        Initialise la position directement (optionnel).
-        """
-        self.x[0] = x
-        self.x[1] = y
 
 
 # This is the callback function that will be called when data is available from the pipeline
@@ -164,39 +80,27 @@ def app_callback(pad, info, user_data):
     roi = hailo.get_roi_from_buffer(buffer)
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
     user_data.last_detections = detections
-    # print(f'user_data : {user_data.current_fps} fps')
-    # print(f"FPS: {user_data.current_fps:.2f}, Droprate: {user_data.current_droprate:.2f}, Avg FPS: {user_data.avg_fps:.2f}")
     
     # Mise à jour de la liste des centres
     calc_bbox_centers(user_data, CONFIDENCE_THRESHOLD)
 
-    # === KALMAN FILTER ===
-    # 1. Chercher la détection la plus "certaine" (label TRACK_OBJECTS + conf max)
-    best_det = None
-    best_conf = 0.0
+    # === DEEPSORT TRACKER ===
+    # Convert detections to a format suitable for DeepSORT
+    detection_bboxes = []
     for d in detections:
-        if d.get_label() in TRACK_OBJECTS:
-            c = d.get_confidence()
-            if c >= CONFIDENCE_THRESHOLD and c > best_conf:
-                best_conf = c
-                best_det = d
+        if d.get_label() in TRACK_OBJECTS and d.get_confidence() >= CONFIDENCE_THRESHOLD:
+            bbox = d.get_bbox()
+            detection_bboxes.append([bbox.xmin(), bbox.ymin(), bbox.xmax(), bbox.ymax()])
 
-    # 2. On exécute le predict() du filtre à chaque frame
-    user_data.kalman_filter.predict()
+    # Update the tracker with the current detections
+    user_data.tracker.update(detection_bboxes)
 
-    # 3. S'il y a une détection valide => update() avec la position (x_center, y_center)
-    if best_det is not None:
-        bbox = best_det.get_bbox()
-        center_x = 0.5 * (bbox.xmin() + bbox.xmax())
-        center_y = 0.5 * (bbox.ymin() + bbox.ymax())
-        user_data.kalman_filter.update([center_x, center_y])
-
-    # 4. Récupérer la position estimée pour usage ultérieur
-    kx, ky = user_data.kalman_filter.get_estimated_position()
-    user_data.kalman_filtered_center = (kx, ky)
+    # Retrieve the current tracks
+    tracks = user_data.tracker.get_tracks()
 
     # Optionnel : on peut ici appeler la logique de pilotage de caméra
-    # camera_deplacement.update_position(kx, ky)
+    # for track in tracks:
+    #     camera_deplacement.update_position(track.bbox[0], track.bbox[1])
 
     return Gst.PadProbeReturn.OK
 
@@ -261,15 +165,23 @@ def draw_overlay(cairooverlay, cr, timestamp, duration, user_data):
         cr.arc(bx, by, 5, 0, 2 * 3.14159)
         cr.fill()
 
-    # === KALMAN FILTER ===
-    # Dessin du centre filtré en vert
-    kx, ky = user_data.kalman_filtered_center
-    bx_f = kx * width
-    by_f = ky * height
+    cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
+    cr.set_font_size(14)
+    # === DEEPSORT TRACKER ===
+    # Dessin des tracks en vert
     cr.set_source_rgb(0, 1, 0)  # Vert
-    cr.arc(bx_f, by_f, 4, 0, 2 * 3.14159)
-    cr.fill()
+    for track in user_data.tracker.get_tracks():
+        center_x, center_y = track.center
+        bx_f = center_x * width
+        by_f = center_y * height
+        cr.arc(bx_f, by_f, 4, 0, 2 * 3.14159)
+        cr.fill()
 
+        # Draw track ID above the bounding box
+        track_id = str(track.track_id)
+        print(f"Track ID {track_id} : {track.bbox}")
+        cr.move_to(bx_f + 20 , by_f + 20)  # Position text above the bounding box
+        cr.show_text(track_id)
 
 def move_window():
     """
@@ -335,7 +247,6 @@ class PID:
 
         return output
 
-
 class ServoController:
     """
     Pilotage d'un servo via PCA9685.
@@ -377,7 +288,6 @@ class ServoController:
     def cleanup(self):
         self.pca.channels[self.channel].duty_cycle = 0
         self.pca.deinit()
-
 
 class CameraDeplacement:
     """
@@ -451,7 +361,6 @@ class CameraDeplacement:
         self.pid_x.reset()
         self.pid_y.reset()
 
-
 # ========================================
 # =============== MAIN ===================
 # ========================================
@@ -484,16 +393,5 @@ if __name__ == "__main__":
         exit(1)
     cairo_overlay.connect("draw", draw_overlay, user_data)
 
-    # On peut lancer en parallèle un thread pour piloter la caméra 
-    # en temps quasi-réel (ou on peut le faire directement dans le callback).
-    # def camera_control_loop():
-    #     while True:
-    #         # Utiliser la position filtrée
-    #         kx, ky = user_data.kalman_filtered_center
-    #         camera_deplacement.update_position(kx, ky)
-    #         time.sleep(0.01)  # pour éviter de saturer le CPU
-    
-    # threading.Thread(target=camera_control_loop, daemon=True).start()
-    
     # Lancement de l'application GStreamer
     app.run()
