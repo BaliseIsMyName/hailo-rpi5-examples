@@ -385,6 +385,13 @@ class GStreamerApp:
 
     def on_fps_measurement(self, sink, fps, droprate, avgfps):
         print(f"FPS: {fps:.2f}, Droprate: {droprate:.2f}, Avg FPS: {avgfps:.2f}")
+        # S'assurer qu'on a bien self.user_data
+        if self.user_data is not None:
+            # Stocker les valeurs instantanées dans user_data
+            # Tu peux choisir les noms d’attributs que tu veux
+            self.user_data.current_fps = fps
+            self.user_data.current_droprate = droprate
+            self.user_data.avg_fps = avgfps
         return True
 
     def create_pipeline(self):
