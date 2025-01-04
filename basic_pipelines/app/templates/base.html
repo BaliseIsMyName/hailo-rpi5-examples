@@ -19,7 +19,7 @@
                   <a href="/profile" class="navbar-user">{{ user.username }}</a>
                   <button id="logout-button" class="navbar-button">Logout</button>
                   {% else %}
-                  <a href="/login" class="navbar-button">Login</a>
+                  <a href="/loginN" class="navbar-button">Login</a>
                   {% endif %}
             </div>
       </nav>
@@ -39,7 +39,7 @@
                               await fetch('/logout', {
                                     method: 'POST',
                               });
-                              window.location.href = '/login';
+                              window.location.href = '/loginN';
                         });
                   }
             });

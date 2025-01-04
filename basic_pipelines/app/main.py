@@ -38,7 +38,7 @@ models.Base.metadata.create_all(bind=database.engine)
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
       if exc.status_code == status.HTTP_401_UNAUTHORIZED:
-            return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
+            return RedirectResponse(url="/loginN", status_code=status.HTTP_302_FOUND)
       return RedirectResponse(url="/error", status_code=exc.status_code)  # Optionnel: gérer d'autres erreurs
 
 # Page d'accueil (login requis)
@@ -47,7 +47,7 @@ async def read_home(request: Request, current_user: schemas.User = Depends(oauth
       return templates.TemplateResponse("index.html", {"request": request, "user": current_user})
 
 # Page de login
-@app.get("/login", response_class=HTMLResponse)
+@app.get("/loginN", response_class=HTMLResponse)
 async def get_login(request: Request):
       return templates.TemplateResponse("login.html", {"request": request, "user": None})
 

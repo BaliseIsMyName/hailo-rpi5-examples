@@ -1,56 +1,74 @@
 #!/usr/bin/env python3
-# detection_main.py
-
-import gi
-gi.require_version('Gst', '1.0')
-from gi.repository import Gst, GLib, GObject
+# instance_segmentation_test_camera.py
 
 import os
 import socket
 import json
 import threading
 import time
+import subprocess
+
+import gi
+gi.require_version('Gst', '1.0')
+from gi.repository import Gst, GLib, GObject
+
 import hailo
 import numpy as np
 import matplotlib.pyplot as plt
-import subprocess
 
+# Imports PCA9685 & co
+import board
+import busio
+from adafruit_pca9685 import PCA9685
 
+# Imports Hailo RPi communs
 from hailo_rpi_common import (
     get_caps_from_pad,
     get_numpy_from_buffer,
     app_callback_class,
 )
+
+# Import du pipeline GStreamer instance segmentation
 from instance_segmentation_pipeline_modif import GStreamerInstanceSegmentationApp
 
-# -----------------------------
-# ParamÃ¨tres de dÃ©tection
-# -----------------------------
-TRACK_OBJECTS = ["person", "cat"]  # on peut changer si besoin
+# =============================
+# ========= CONSTANTES ========
+# =============================
 
-# -----------------------------
-# ParamÃ¨tres du socket
-# -----------------------------
-SOCKET_PATH = "/tmp/hailo_camera.sock"
+TRACK_OBJECTS = ["person", "cat"]   # On peut changer si besoin
+CONFIDENCE_THRESHOLD = 0.5          # Seuil de confiance min pour le barycentre
+DEAD_ZONE = 0.05                    # Zone morte en fraction de l'image (pour l'affichage)
 
-# -----------------------------
-# CLASS UserData
-# -----------------------------
+# ========================================
+# =========== USER APP CALLBACK ==========
+# ========================================
+
 class user_app_callback_class(app_callback_class):
     def __init__(self):
         super().__init__()
         self.last_detections = []
         self.width = None
         self.height = None
-        self.barycentre_x = None
-        self.barycentre_y = None
-        self.detection_event = threading.Event()  # Événement pour signaler les détections
-        self.lock = threading.Lock()  # Pour synchroniser l'accès aux détections
-        self.dead_zone = 0.05 # Zone morte (5%)
-# -----------------------------
-# Callbacks GStreamer
-# -----------------------------
+
+        # Liste de barycentres (chacun : (x_norm, y_norm))
+        self.barycenters = []
+
+        self.detection_event = threading.Event()
+        self.lock = threading.Lock()
+
+        # Zone morte pour l'affichage
+        self.dead_zone = DEAD_ZONE
+
+
+# =============================
+# ========== GST CALLBACK =====
+# =============================
+
 def app_callback(pad, info, user_data):
+    """
+    Récupération des détections Hailo, puis calcule TOUS les barycentres
+    en utilisant user_data.last_detections.
+    """
     buffer = info.get_buffer()
     if buffer is None:
         return Gst.PadProbeReturn.OK
@@ -60,283 +78,320 @@ def app_callback(pad, info, user_data):
         user_data.width = width
         user_data.height = height
 
-    # Récupération des détections via Hailo
+    # Récupération des détections
     roi = hailo.get_roi_from_buffer(buffer)
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
     user_data.last_detections = detections
-        
-    # Signaler qu'une nouvelle détection est disponible
-    if detections:
-        user_data.detection_event.set()
-        
+
+    # Calculer tous les barycentres
+    # calc_barycentres(user_data, CONFIDENCE_THRESHOLD)
+
+    # Signaler qu'on a de nouvelles détections / nouveaux barycentres
+    user_data.detection_event.set()
+
     return Gst.PadProbeReturn.OK
 
+
+# ============================================
+# =========== FONCTION calc_barycentres ======
+# ============================================
+def calc_barycentres(user_data, confidence_threshold=CONFIDENCE_THRESHOLD):
+    """
+    Parcourt user_data.last_detections pour calculer et stocker DANS user_data.barycenters
+    tous les barycentres normalisés (0..1) des masques valides (label suivi, conf >= threshold).
+    
+    Si pas de détection valide => user_data.barycenters = [] (liste vide).
+    """
+    # On vide la liste à chaque nouvelle frame
+    user_data.barycenters = []
+
+    detections = user_data.last_detections
+    if not detections:
+        return
+
+    width = user_data.width
+    height = user_data.height
+    if width is None or height is None:
+        return
+
+    # Parcours de toutes les détections
+    for detection in detections:
+        label = detection.get_label()
+        confidence = detection.get_confidence()
+
+        # Vérifier label et confiance
+        if label not in TRACK_OBJECTS or confidence < confidence_threshold:
+            continue
+
+        # Récupérer le(s) masque(s)
+        masks = detection.get_objects_typed(hailo.HAILO_CONF_CLASS_MASK)
+        if len(masks) == 0:
+            continue
+
+        mask = masks[0]
+        mask_height = mask.get_height()
+        mask_width = mask.get_width()
+        data = np.array(mask.get_data()).reshape((mask_height, mask_width))
+
+        total_weight = np.sum(data)
+        if total_weight <= 0:
+            continue
+
+        # Indices non nuls
+        y_indices, x_indices = np.nonzero(data)
+        bary_x_local = np.sum(x_indices * data[y_indices, x_indices]) / total_weight
+        bary_y_local = np.sum(y_indices * data[y_indices, x_indices]) / total_weight
+
+        # Récupérer la bbox normalisée
+        bbox = detection.get_bbox()
+
+        # Convertir xmin, ymin en pixels
+        x_min = int(bbox.xmin() * width)
+        y_min = int(bbox.ymin() * height)
+
+        # Suppose qu'il faut multiplier par 4 (downsampling)
+        bary_x_pixel = x_min + (bary_x_local * 4)
+        bary_y_pixel = y_min + (bary_y_local * 4)
+
+        # Normaliser [0..1]
+        bx_norm = round(bary_x_pixel / float(width), 4)
+        by_norm = round(bary_y_pixel / float(height), 4)
+
+        user_data.barycenters.append((bx_norm, by_norm))
+
 def draw_overlay(cairooverlay, cr, timestamp, duration, user_data):
+    """
+    Affiche la zone morte (cercle) + le(s) barycentre(s) (point rouge) si dispo.
+    """
     if user_data.width is None or user_data.height is None:
         return
 
     width = user_data.width
     height = user_data.height
 
-    # Calculer le rayon basé sur la zone morte
+    # Dessin du cercle bleu (zone morte)
     min_dimension = min(width, height)
     radius = user_data.dead_zone * min_dimension
-
-    # Dessiner un cercle bleu représentant la zone morte au centre de la vidéo
     cr.set_source_rgb(0, 0, 1)  # Bleu
     cr.arc(width / 2, height / 2, radius, 0, 2 * 3.14159)
-    cr.stroke()  # Utiliser stroke pour dessiner le contour du cercle
+    cr.stroke()
 
-    # Dessiner un point rouge au barycentre de chaque masque de dÃ©tection
+    # Affichage de TOUS les barycentres stockés
     cr.set_source_rgb(1, 0, 0)  # Rouge
-    for det in user_data.last_detections:
-        label = det.get_label()  # "person", "cat", etc.
-        if label not in TRACK_OBJECTS:
-            continue
+    for (bary_x, bary_y) in user_data.barycenters:
+        bx = bary_x * width
+        by = bary_y * height
 
-        bbox = det.get_bbox()
-        masks = det.get_objects_typed(hailo.HAILO_CONF_CLASS_MASK)
-        if len(masks) != 0:
-            mask = masks[0]
-            mask_height = mask.get_height()
-            mask_width = mask.get_width()
-            data = np.array(mask.get_data())
-            data = data.reshape((mask_height, mask_width))
-
-            # Calculer le barycentre du masque
-            y_indices, x_indices = np.nonzero(data)
-            total_weight = np.sum(data)
-            if total_weight > 0:
-                barycentre_x = int(np.sum(x_indices * data[y_indices, x_indices]) / total_weight)
-                barycentre_y = int(np.sum(y_indices * data[y_indices, x_indices]) / total_weight)
-
-                # Convertir les coordonnées du barycentre en coordonnées de l'image
-                x_min, y_min = int(bbox.xmin() * width), int(bbox.ymin() * height)
-                barycentre_x = x_min + barycentre_x * 4
-                barycentre_y = y_min + barycentre_y * 4
-
-                # Stocker les coordonnées du barycentre dans user_data
-                user_data.barycentre_x = barycentre_x / width
-                user_data.barycentre_y = barycentre_y / height
-                
-                # Dessiner un point au barycentre sur l'image
-                cr.arc(barycentre_x, barycentre_y, 5, 0, 2 * 3.14159)
-                cr.fill()
-
-# -----------------------------
-# Classe Sender pour Unix Domain Socket
-# -----------------------------
-class UnixDomainSocketSender:
-    """
-    Gère la connexion à un socket Unix local et l'envoi de messages de détection
-    uniquement lorsque le service est actif. Intègre la logique d'envoi pour limiter
-    la fréquence et éviter les charges CPU excessives.
-    """
-    def __init__(self, socket_path=SOCKET_PATH, service_name='cameracontrol.service', user_data=None):
-        self.socket_path = socket_path
-        self.service_name = service_name
-        self.user_data = user_data
-
-        self.sock = None
-        self.connected = False
-        self._stop = False
-        self.lock = threading.Lock()  # Pour gérer l'accès concurrent à self.sock
-
-        self.detection_event = threading.Event()
-
-    def start(self):
-        """Démarre les threads de vérification de service et de traitement des détections."""
-        self.service_thread = threading.Thread(target=self._service_monitor_loop, daemon=True)
-        self.service_thread.start()
-
-        self.process_thread = threading.Thread(target=self._process_detections, daemon=True)
-        self.process_thread.start()
-
-    def stop(self):
-        """Arrête les threads et ferme la socket."""
-        self._stop = True
-        self.detection_event.set()  # Débloquer la queue si en attente
-        with self.lock:
-            if self.sock:
-                self.sock.close()
-        if self.service_thread.is_alive():
-            self.service_thread.join()
-        if self.process_thread.is_alive():
-            self.process_thread.join()
-
-    def _service_monitor_loop(self):
-        """Vérifie l'état du service toutes les 10 secondes et gère la connexion."""
-        while not self._stop:
-            if self._is_service_active():
-                if not self.connected:
-                    self._connect()
-            else:
-                if self.connected:
-                    self._disconnect()
-            time.sleep(10)  # Intervalle de vérification de l'état du service
-
-    def _is_service_active(self):
-        """
-        Vérifie si le service systemd utilisateur est actif.
-        
-        Returns:
-            bool: True si le service est actif, False sinon.
-        """
-        try:
-            result = subprocess.run(
-                ['systemctl', '--user', 'is-active', self.service_name],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-                text=True
-            )
-            is_active = result.stdout.strip() == 'active'
-            if is_active:
-                print(f"[UnixDomainSocketSender] Service {self.service_name} est actif.")
-            else:
-                print(f"[UnixDomainSocketSender] Service {self.service_name} n'est pas actif.")
-            return is_active
-        except subprocess.CalledProcessError:
-            print(f"[UnixDomainSocketSender] Service {self.service_name} n'est pas actif (appel systemctl échoué).")
-            return False
-
-    def _connect(self):
-        """Tente de se connecter au socket Unix."""
-        try:
-            with self.lock:
-                self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                self.sock.connect(self.socket_path)
-            self.connected = True
-            print("[UnixDomainSocketSender] Connecté au serveur camera.")
-        except socket.error as e:
-            # print(f"[UnixDomainSocketSender] Erreur de connexion : {e}. Retry dans 10s...")
-            self.connected = False
-            if self.sock:
-                self.sock.close()
-                self.sock = None
-
-    def _disconnect(self):
-        """Déconnecte le socket Unix."""
-        with self.lock:
-            if self.sock:
-                self.sock.close()
-                self.sock = None
-        self.connected = False
-        print("[UnixDomainSocketSender] Déconnecté du serveur camera.")
-
-    def _process_detections(self):
-        """Traite et envoie les détections."""
-        while not self._stop:
-            # Attendre qu'une nouvelle détection soit disponible ou un timeout
-            self.detection_event.wait(timeout=0.1)
-            self.detection_event.clear()
-
-            if self._stop:
-                break
-
-            detections_to_send = []
-            with self.user_data.lock:
-                detections = list(self.user_data.last_detections)  # Copie sécurisée
-
-            # Filtrer les détections selon le seuil et les objets suivis
-            for det in detections:
-                label = det.get_label()
-                confidence = det.get_confidence()
-                if label in TRACK_OBJECTS and confidence >= 0.5:
-                    barycentre_x = self.user_data.barycentre_x
-                    barycentre_y = self.user_data.barycentre_y
-                    if barycentre_x is not None and barycentre_y is not None:
-                        detection_msg = {
-                            "label": label,
-                            "confidence": confidence,
-                            "x_center": barycentre_x,
-                            "y_center": barycentre_y
-                        }
-                        detections_to_send.append(detection_msg)
-
-            # Envoyer toutes les détections filtrées
-            for detection in detections_to_send:
-                self._send_detection(detection)
-
-    def queue_detection(self, detection: dict):
-        """Déclenche l'envoi des détections en signalant l'événement."""
-        self.detection_event.set()
-
-    def _send_detection(self, detection: dict):
-        """Envoie une détection si connecté et service actif."""
-        if not self.connected:
-            # Ne pas envoyer si non connecté
-            return
-        
-        """
-        Envoie un dict JSON représentant la détection:
-        {
-          "label": "person" ou "cat",
-          "confidence": <float>,
-          "x_center": <float, 0..1>,
-          "y_center": <float, 0..1>
-        }
-        """
-        try:
-            message = json.dumps(detection) + "\n"
-            with self.lock:
-                self.sock.sendall(message.encode("utf-8"))
-            print(f"[UnixDomainSocketSender] Détection envoyée: {detection}")
-        except socket.error as e:
-            print(f"[UnixDomainSocketSender] Erreur d'envoi : {e}")
-            self._disconnect()
+        cr.arc(bx, by, 5, 0, 2 * 3.14159)
+        cr.fill()
 
 
-# -----------------------------déplacement de la fenêtre dans le coin en haut à droite de l'écran -----------------------------
 def move_window():
+    """
+    Déplace la fenêtre 'Hailo Detection App' en (440,62).
+    """
     while True:
         try:
-            window_ids = subprocess.check_output(['xdotool', 'search', '--name', 'Hailo Detection App']).decode().strip().split('\n')
+            window_ids = subprocess.check_output(
+                ['xdotool', 'search', '--name', 'Hailo Detection App']
+            ).decode().strip().split('\n')
             if window_ids:
                 window_id = window_ids[0]
                 subprocess.run(['xdotool', 'windowmove', window_id, '440', '62'])
                 print(f"Fenêtre déplacée : ID {window_id} vers (440, 62)")
-                break  # Terminer le thread après déplacement
+                break
             else:
                 print("Fenêtre 'Hailo Detection App' non trouvée, tentative suivante...")
         except subprocess.CalledProcessError:
             print("Erreur lors de la recherche de la fenêtre 'Hailo Detection App', tentative suivante...")
-        time.sleep(1)
+        time.sleep(3)
 
 
-# -----------------------------
-# MAIN
-# -----------------------------
+# ========================================
+# =========== PILOTAGE CAMERA ============
+# ========================================
+class PID:
+    """
+    Implémentation simple d'un PID (non utilisé pour l'instant).
+    """
+    def __init__(self, kp=1.0, ki=0.0, kd=0.0, setpoint=0.5, output_limits=(-999, 999)):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.setpoint = setpoint
+        self.output_limits = output_limits
+        self._integral = 0.0
+        self._last_error = 0.0
+        self._last_time = time.time()
+
+    def reset(self):
+        self._integral = 0.0
+        self._last_error = 0.0
+        self._last_time = time.time()
+
+    def update(self, measurement):
+        now = time.time()
+        dt = now - self._last_time
+        if dt <= 0.0:
+            dt = 1e-16
+
+        error = self.setpoint - measurement
+        p_out = self.kp * error
+        self._integral += error * dt
+        i_out = self.ki * self._integral
+        derivative = (error - self._last_error) / dt
+        d_out = self.kd * derivative
+
+        output = p_out + i_out + d_out
+        min_out, max_out = self.output_limits
+        output = max(min_out, min(output, max_out))
+
+        self._last_error = error
+        self._last_time = now
+
+        return output
+
+
+class ServoController:
+    """
+    Pilotage d'un servo via PCA9685 (non utilisé pour l'instant).
+    """
+    def __init__(
+        self, 
+        channel=0, 
+        freq=50, 
+        i2c_address=0x40, 
+        servo_min_us=500, 
+        servo_max_us=2500, 
+        max_angle=180
+    ):
+        # Initialisation du bus I2C + PCA9685
+        i2c = busio.I2C(board.SCL, board.SDA)
+        self.pca = PCA9685(i2c, address=i2c_address)
+        self.pca.frequency = freq
+
+        self.channel = channel
+        self.servo_min_us = servo_min_us
+        self.servo_max_us = servo_max_us
+        self.max_angle = max_angle
+
+        # Angle actuel : on suppose qu'on démarre "au milieu"
+        self.current_angle = max_angle / 2.0
+        self.set_servo_angle(self.current_angle)
+
+    def _us_to_duty_cycle(self, pulse_us):
+        period_us = 1_000_000 // self.pca.frequency  # ex: 20_000µs @ 50Hz
+        duty_cycle = int((pulse_us / period_us) * 65535)
+        return max(0, min(65535, duty_cycle))
+
+    def set_servo_angle(self, angle_deg):
+        angle_clamped = max(0, min(self.max_angle, angle_deg))
+        self.current_angle = angle_clamped
+
+        span_us = self.servo_max_us - self.servo_min_us
+        pulse_us = self.servo_min_us + (span_us * (angle_clamped / float(self.max_angle)))
+        self.pca.channels[self.channel].duty_cycle = self._us_to_duty_cycle(pulse_us)
+
+    def cleanup(self):
+        self.pca.channels[self.channel].duty_cycle = 0
+        self.pca.deinit()
+
+
+class CameraDeplacement:
+    """
+    Gère deux servos (horizontal + vertical) avec 2 PID.
+    """
+    def __init__(
+        self,
+        p_horizontal=1.0, i_horizontal=0.0, d_horizontal=0.0,
+        p_vertical=1.0, i_vertical=0.0, d_vertical=0.0,
+        dead_zone=0.05,
+        vertical_min_angle=45,
+        vertical_max_angle=135,
+        horizontal_min_angle=0,
+        horizontal_max_angle=270
+    ):
+        # Instancie les servos
+        self.servo_horizontal = ServoController(channel=0, max_angle=270)
+        self.servo_vertical   = ServoController(channel=1, max_angle=180)
+
+        # Instancie les PID
+        self.pid_x = PID(kp=p_horizontal, ki=i_horizontal, kd=d_horizontal,
+                         setpoint=0.5, output_limits=(-150, 150))
+        self.pid_y = PID(kp=p_vertical, ki=i_vertical, kd=d_vertical,
+                         setpoint=0.5, output_limits=(-50, 50))
+
+        self.dead_zone = dead_zone
+        self.horizontal_min_angle = horizontal_min_angle
+        self.horizontal_max_angle = horizontal_max_angle
+        self.vertical_min_angle = vertical_min_angle
+        self.vertical_max_angle = vertical_max_angle
+
+    def update_position(self, x_center, y_center):
+        """(Non modifié) - Logique de déplacement selon x_center, y_center."""
+        pass
+
+    def position_zero(self):
+        """
+        Place la caméra à l'angle "zéro" souhaité :
+        135° pour l'horizontal et 90° pour le vertical.
+        """
+        self.servo_horizontal.set_servo_angle(135)
+        self.servo_vertical.set_servo_angle(90)
+        time.sleep(1)  # Laisser le temps au servo d'atteindre la position
+
+    def cleanup_servo(self):
+        """
+        Coupe la PWM et reset les PID. 
+        (Sans positionner la caméra, désormais fait dans position_zero().)
+        """
+        self.servo_horizontal.cleanup()
+        self.servo_vertical.cleanup()
+        self.pid_x.reset()
+        self.pid_y.reset()
+
+
+# ========================================
+# =============== MAIN ===================
+# ========================================
 if __name__ == "__main__":
     Gst.init(None)
 
-    # 1. PrÃ©parer l'objet user_data
+    # 1. Préparer l'objet user_data
     user_data = user_app_callback_class()
 
-    # 2. CrÃ©ation de l'application GStreamer
+    # 2. Créer l'application GStreamer
     app = GStreamerInstanceSegmentationApp(app_callback, user_data)
 
-    # 3. Création du Sender (Unix domain socket)
-    sender = UnixDomainSocketSender(SOCKET_PATH,
-                                    service_name='cameracontrol.service', user_data=user_data)
-    sender.start()
+    # 3. Initialiser le déplacement de la caméra
+    camera_deplacement = CameraDeplacement(
+        p_horizontal=30.0,
+        i_horizontal=0.01,
+        d_horizontal=0.2,
+        p_vertical=15.0,
+        i_vertical=0.01,
+        d_vertical=0.1,
+        dead_zone=0.02
+    )
 
-    # 5. On récupère le cairo overlay pour dessiner
-    cairo_overlay = app.pipeline.get_by_name("cairo_overlay")
-    if cairo_overlay is None:
-        print("Erreur : cairo_overlay non trouvé dans le pipeline.")
-        exit(1)
-
-    cairo_overlay.connect("draw", draw_overlay, user_data)
-
-        # Lancer un thread pour déplacer la fenêtre vidéo
-    window_mover_thread = threading.Thread(target=move_window, daemon=True)
-    window_mover_thread.start()
+    camera_deplacement.position_zero()
     
-    # 6. Lancement de l'appli GStreamer
+    # # 4. Récupérer le cairo_overlay pour dessiner
+    # cairo_overlay = app.pipeline.get_by_name("cairo_overlay")
+    # if cairo_overlay is None:
+    #     print("Erreur : cairo_overlay non trouvé dans le pipeline.")
+    #     exit(1)
+
+    # cairo_overlay.connect("draw", draw_overlay, user_data)
+
+    # # Thread pour déplacer la fenêtre vidéo (optionnel)
+    # window_mover_thread = threading.Thread(target=move_window, daemon=True)
+    # window_mover_thread.start()
+
+    # 5. Lancement de l'application GStreamer
     try:
         app.run()
     except KeyboardInterrupt:
         pass
     finally:
-        sender.stop()
+        camera_deplacement.cleanup_servo()

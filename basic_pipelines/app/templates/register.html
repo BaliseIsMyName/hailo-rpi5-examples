@@ -33,7 +33,7 @@
 
             <button type="submit" class="button">Register</button>
       </form>
-      <p>Déjà un compte ? <a href="/login" class="button">Connectez-vous ici</a></p>
+      <p>Déjà un compte ? <a href="/loginN" class="button">Connectez-vous ici</a></p>
 
       <!-- Conteneur pour les messages d'erreur -->
       <div id="error-message" class="error-message"></div>
@@ -136,7 +136,7 @@
                   console.log('Inscription réussie :', data);
                   document.getElementById('admin_password').classList.remove('input-error');
                   alert('Inscription réussie !');
-                  window.location.href = '/login';
+                  window.location.href = '/loginN';
             } catch (error) {
                   console.error('Erreur lors de l\'inscription :', error);
                   // Afficher une erreur générale si une exception est levée

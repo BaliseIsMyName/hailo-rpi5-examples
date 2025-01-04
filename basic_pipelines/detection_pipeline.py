@@ -103,14 +103,35 @@ class GStreamerDetectionApp(GStreamerApp):
             f'{source_pipeline} '
             f'{detection_pipeline} ! '
             f'{user_callback_pipeline} ! '
-            f'{display_pipeline}'
+                        # hailooverlay
+            f'{QUEUE("hailo_display_hailooverlay_q")} ! '
+            f'hailooverlay name=hailo_overlay ! '
+            # videoconvert pour assurer format compatible cairooverlay
+            f'{QUEUE("pre_cairo_convert_q")} ! '
+            f'videoconvert name=pre_cairo_convert ! '
+            # cairooverlay
+            f'{QUEUE("cairo_q")} ! '
+            f'cairooverlay name=cairo_overlay ! '
+            # videoconvert après cairooverlay
+            f'{QUEUE("hailo_display_videoconvert_q")} ! '
+            f'videoconvert name=hailo_display_videoconvert n-threads=2 qos=false ! '
+            # Ajout du tee
+            f'tee name=t '
+            # # Branche pour l'affichage local
+            f't. ! queue ! '
+            f'fpsdisplaysink name=hailo_display video-sink={self.video_sink} sync={self.sync} text-overlay={self.show_fps} signal-fps-measurements=true '
+            # Branche pour le streaming RTMP
+            f't. ! queue ! '
+            f'x264enc tune=zerolatency bitrate=1200 speed-preset=superfast ! '
+            f'flvmux streamable=true ! '
+            f'rtmpsink location="rtmp://localhost/live/stream live=1" '
         )
         print(pipeline_string)
         return pipeline_string
 
-if __name__ == "__main__":
-    # Create an instance of the user app callback class
-    user_data = app_callback_class()
-    app_callback = dummy_callback
-    app = GStreamerDetectionApp(app_callback, user_data)
-    app.run()
+# if __name__ == "__main__":
+#     # Create an instance of the user app callback class
+#     user_data = app_callback_class()
+#     app_callback = dummy_callback
+#     app = GStreamerDetectionApp(app_callback, user_data)
+#     app.run()
