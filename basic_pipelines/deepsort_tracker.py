@@ -1,11 +1,25 @@
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 from collections import deque
+from filterpy.kalman import KalmanFilter
 
 class Track:
     def __init__(self, track_id, bbox, max_age=30):
         self.track_id = track_id
         self.bbox = bbox
+        self.kf = KalmanFilter(dim_x=7, dim_z=4)
+        self.kf.F = np.eye(7)
+        self.kf.H = np.array([
+            [1, 0, 0, 0, 0, 0, 0],
+            [0, 1, 0, 0, 0, 0, 0],
+            [0, 0, 1, 0, 0, 0, 0],
+            [0, 0, 0, 1, 0, 0, 0]
+        ])
+        self.kf.R[2:, 2:] *= 10.
+        self.kf.P[4:, 4:] *= 1000.
+        self.kf.P *= 10.
+        self.kf.Q[-1, -1] *= 0.01
+        self.kf.Q[4:, 4:] *= 0.01
         self.age = 0
         self.time_since_update = 0
         self.hits = 0
@@ -20,7 +34,8 @@ class Track:
         return center_x, center_y
   
     def update(self, bbox):
-        self.bbox = bbox
+        self.kf.update(np.array(bbox))
+        self.bbox = self.kf.x[:4]
         self.age += 1
         self.time_since_update = 0
         self.hits += 1
@@ -28,6 +43,8 @@ class Track:
         self.history.append(bbox)
 
     def predict(self):
+        self.kf.predict()
+        self.bbox = self.kf.x[:4]
         self.age += 1
         self.time_since_update += 1
         if self.time_since_update > 0:
