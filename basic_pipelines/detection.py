@@ -14,6 +14,8 @@ import subprocess
 import socket
 import json
 import cairo
+import signal
+import sys
 
 # Imports PCA9685 & co
 import board
@@ -35,6 +37,22 @@ from deepsort_tracker import DeepSORTTracker  # Importing the DeepSORT tracker
 TRACK_OBJECTS = ["person", "cat"]   # Labels à suivre
 CONFIDENCE_THRESHOLD = 0.5          # Seuil de confiance min
 DEAD_ZONE = 0.05                    # Zone morte (en fraction de l'image)
+# Flag pour indiquer si l'application doit s'arrêter
+should_exit = False
+
+def signal_handler(signum, frame):
+    global should_exit
+    print(f"Signal {signum} reçu. Fermeture de l'application...")
+    should_exit = True
+    quit_app(should_exit)
+    
+def quit_app(should_exit):
+    if should_exit:
+        print("Arrêt de l'application...")
+        user_data.camera_controller.stop()
+        user_data.camera_controller.camera_deplacement.position_zero()
+        user_data.camera_controller.camera_deplacement.cleanup_servo()
+        app.shutdown()  # Arrêter le GLib.MainLoop
 
 # ========================================
 # =========== USER APP CALLBACK ==========
@@ -51,6 +69,12 @@ class user_app_callback_class(app_callback_class):
 
         # === DEEPSORT TRACKER ===
         self.tracker = DeepSORTTracker()  # Initialize the DeepSORT tracker
+
+        # === TRACK SELECTOR ===
+        self.track_selector = TrackSelector()
+
+        # === CAMERA CONTROLLER ===
+        self.camera_controller = CameraController(camera_deplacement)
         
         self.current_fps = 0.0
         self.current_droprate = 0.0
@@ -99,8 +123,14 @@ def app_callback(pad, info, user_data):
 
     # Retrieve the current tracks
     tracks = user_data.tracker.get_tracks()
-   
-    # Optionnel : on peut ici appeler la logique de pilotage de caméra
+
+    # Mettre à jour le TrackSelector
+    user_data.track_selector.update_tracks(tracks)
+
+    # Obtenir le centre du track sélectionné
+    selected_center = user_data.track_selector.get_selected_track_center()
+    if selected_center:
+        user_data.camera_controller.update_center(selected_center)
 
 
     return Gst.PadProbeReturn.OK
@@ -185,35 +215,60 @@ def draw_overlay(cairooverlay, cr, timestamp, duration, user_data):
         cr.move_to(bx_f + 10 , by_f + 10)  # Position text above the bounding box
         cr.show_text(track_id)
 
-def move_window():
+# =============================
+# ======= TRACK SELECTOR ======
+# =============================
+class TrackSelector:
     """
-    Déplace la fenêtre 'Hailo Detection App' en (440,62).
+    Sélectionne quel track suivre en fonction des critères définis.
+    Par exemple, suit le track avec l'ID le plus ancien.
     """
-    while True:
-        try:
-            window_ids = subprocess.check_output(
-                ['xdotool', 'search', '--name', 'Hailo Detection App']
-            ).decode().strip().split('\n')
-            if window_ids:
-                window_id = window_ids[0]
-                subprocess.run(['xdotool', 'windowmove', window_id, '440', '62'])
-                print(f"Fenêtre déplacée : ID {window_id} vers (440, 62)")
-                break
-            else:
-                print("Fenêtre 'Hailo Detection App' non trouvée, tentative suivante...")
-        except subprocess.CalledProcessError:
-            print("Erreur lors de la recherche de la fenêtre 'Hailo Detection App', tentative suivante...")
-        time.sleep(3)
+    def __init__(self):
+        self.tracks = []
+        self.selected_track_id = None
+        self.lock = threading.Lock()
+
+    def update_tracks(self, tracks):
+        with self.lock:
+            self.tracks = tracks
+            self.select_track()
+
+    def select_track(self):
+        """
+        Sélectionne le track à suivre. Ici, on choisit le track avec l'ID le plus bas (le plus ancien).
+        """
+        if not self.tracks:
+            self.selected_track_id = None
+            return
+
+        # Trier les tracks par ID croissant (supposant que les IDs augmentent avec le temps)
+        sorted_tracks = sorted(self.tracks, key=lambda t: t.track_id)
+        self.selected_track_id = sorted_tracks[0].track_id
+
+    def get_selected_track_center(self):
+        """
+        Retourne le centre normalisé du track sélectionné.
+        """
+        with self.lock:
+            if self.selected_track_id is None:
+                return None
+
+            for track in self.tracks:
+                if track.track_id == self.selected_track_id:
+                    return track.center
+            return None
 
 # ========================================
 # =========== PILOTAGE CAMERA ============
 # ========================================
-
 class PID:
-    """
-    Implémentation simple d'un PID.
-    """
-    def __init__(self, kp=1.0, ki=0.0, kd=0.0, setpoint=0.5, output_limits=(-999, 999)):
+    def __init__(self, 
+                 kp=1.0, 
+                 ki=0.0, 
+                 kd=0.0, 
+                 setpoint=0.5, 
+                 output_limits=(-999, 999)
+                 ):
         self.kp = kp
         self.ki = ki
         self.kd = kd
@@ -233,36 +288,36 @@ class PID:
         dt = now - self._last_time
         if dt <= 0.0:
             dt = 1e-16
-
+            
         error = self.setpoint - measurement
         p_out = self.kp * error
         self._integral += error * dt
         i_out = self.ki * self._integral
         derivative = (error - self._last_error) / dt
         d_out = self.kd * derivative
-
+        
         output = p_out + i_out + d_out
         min_out, max_out = self.output_limits
         output = max(min_out, min(output, max_out))
-
+        
         self._last_error = error
         self._last_time = now
 
         return output
 
+# ===================================
+# ======= CAMERA SERVOCONTROLLER ========
+# ===================================
 class ServoController:
-    """
-    Pilotage d'un servo via PCA9685.
-    """
     def __init__(
-        self, 
-        channel=0, 
-        freq=50, 
-        i2c_address=0x40, 
-        servo_min_us=500, 
-        servo_max_us=2500, 
-        max_angle=180
-    ):
+                self, 
+                channel=0, 
+                freq=50, 
+                i2c_address=0x40, 
+                servo_min_us=500, 
+                servo_max_us=2500, 
+                max_angle=180
+                ):
         i2c = busio.I2C(board.SCL, board.SDA)
         self.pca = PCA9685(i2c, address=i2c_address)
         self.pca.frequency = freq
@@ -292,6 +347,9 @@ class ServoController:
         self.pca.channels[self.channel].duty_cycle = 0
         self.pca.deinit()
 
+# ===================================
+# ======= CAMERA DEPLACEMENT ========
+# ===================================
 class CameraDeplacement:
     """
     Gère deux servos (horizontal + vertical) avec 2 PID.
@@ -364,30 +422,96 @@ class CameraDeplacement:
         self.pid_x.reset()
         self.pid_y.reset()
 
+# ===================================
+# ======= CAMERA CONTROLLER ========
+# ===================================
+class CameraController:
+    """
+    Pilote la caméra en fonction des coordonnées fournies.
+    """
+    def __init__(self, camera_deplacement):
+        self.camera_deplacement = camera_deplacement
+        self.current_center = None
+        self.lock = threading.Lock()
+        self.running = True
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+
+    def update_center(self, center):
+        with self.lock:
+            self.current_center = center
+
+    def run(self):
+        while self.running:
+            with self.lock:
+                center = self.current_center
+            if center:
+                x_center, y_center = center
+                # Vérifier si l'objet est en dehors de la zone morte
+                if (abs(x_center - 0.5) > self.camera_deplacement.dead_zone or
+                    abs(y_center - 0.5) > self.camera_deplacement.dead_zone):
+                    self.camera_deplacement.update_position(x_center, y_center)
+            time.sleep(0.1)  # Ajuster la fréquence selon les besoins
+
+    def stop(self):
+        self.running = False
+        self.thread.join()
+
+# ===================================
+# ======= DEPLACEMENT WINDOWS APP ========
+# ===================================
+def move_window():
+    """
+    Déplace la fenêtre 'Hailo Detection App' en (440,62).
+    """
+    while True:
+        try:
+            window_ids = subprocess.check_output(
+                ['xdotool', 'search', '--name', 'Hailo Detection App']
+            ).decode().strip().split('\n')
+            if window_ids:
+                window_id = window_ids[0]
+                subprocess.run(['xdotool', 'windowmove', window_id, '440', '62'])
+                print(f"Fenêtre déplacée : ID {window_id} vers (440, 62)")
+                break
+            else:
+                print("Fenêtre 'Hailo Detection App' non trouvée, tentative suivante...")
+        except subprocess.CalledProcessError:
+            print("Erreur lors de la recherche de la fenêtre 'Hailo Detection App', tentative suivante...")
+        time.sleep(3)
+
+
 # ========================================
 # =============== MAIN ===================
 # ========================================
 if __name__ == "__main__":
-    # Create an instance of the user app callback class
-    user_data = user_app_callback_class()
-    app = GStreamerDetectionApp(app_callback, user_data)
-
+    # Enregistrer les gestionnaires de signaux
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
     # Thread pour déplacer la fenêtre vidéo (optionnel)
     window_mover_thread = threading.Thread(target=move_window, daemon=True)
     window_mover_thread.start()
     
     # Initialiser le déplacement de la caméra
     camera_deplacement = CameraDeplacement(
-        p_horizontal=5.0,
+        p_horizontal=30.0,
         i_horizontal=0.01,
         d_horizontal=0.2,
-        p_vertical=5.0,
+        p_vertical=15.0,
         i_vertical=0.01,
         d_vertical=0.1,
-        dead_zone=0.02
+        dead_zone=0.05
     )
     # camera_deplacement.position_turn()
     camera_deplacement.position_zero()
+    
+    # Create an instance of the user app callback class
+    user_data = user_app_callback_class()
+    app = GStreamerDetectionApp(app_callback, user_data)
+    
+    # Initialiser le TrackSelector et le CameraController
+    user_data.track_selector = TrackSelector()
+    user_data.camera_controller = CameraController(camera_deplacement)
     
     # Récupérer le cairo_overlay pour dessiner
     cairo_overlay = app.pipeline.get_by_name("cairo_overlay")
@@ -397,6 +521,11 @@ if __name__ == "__main__":
     cairo_overlay.connect("draw", draw_overlay, user_data)
 
     # Lancement de l'application GStreamer
-    app.run()
+    try:
+        app.run()  # Démarrer le GLib.MainLoop
+    except Exception as e:
+        print(f"Exception rencontrée : {e}")
+    finally:
+        print("Application fermée proprement.")
 
 #Fin de detection.py
