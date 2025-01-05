@@ -1,3 +1,5 @@
+#detection.py
+
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib, GObject
@@ -97,10 +99,9 @@ def app_callback(pad, info, user_data):
 
     # Retrieve the current tracks
     tracks = user_data.tracker.get_tracks()
-
+   
     # Optionnel : on peut ici appeler la logique de pilotage de caméra
-    # for track in tracks:
-    #     camera_deplacement.update_position(track.bbox[0], track.bbox[1])
+
 
     return Gst.PadProbeReturn.OK
 
@@ -172,6 +173,7 @@ def draw_overlay(cairooverlay, cr, timestamp, duration, user_data):
     cr.set_source_rgb(0, 1, 0)  # Vert
     for track in user_data.tracker.get_tracks():
         center_x, center_y = track.center
+        # print(f"[DISPLAY] Track ID={track.track_id}, center_x={round(center_x, 4)},center_y={round(center_y, 4)}")
         bx_f = center_x * width
         by_f = center_y * height
         cr.arc(bx_f, by_f, 4, 0, 2 * 3.14159)
@@ -179,8 +181,8 @@ def draw_overlay(cairooverlay, cr, timestamp, duration, user_data):
 
         # Draw track ID above the bounding box
         track_id = str(track.track_id)
-        print(f"Track ID {track_id} : {track.bbox}")
-        cr.move_to(bx_f + 20 , by_f + 20)  # Position text above the bounding box
+        # print(f"Track ID {track_id} : {track.bbox}")
+        cr.move_to(bx_f + 10 , by_f + 10)  # Position text above the bounding box
         cr.show_text(track_id)
 
 def move_window():
@@ -206,6 +208,7 @@ def move_window():
 # ========================================
 # =========== PILOTAGE CAMERA ============
 # ========================================
+
 class PID:
     """
     Implémentation simple d'un PID.
@@ -375,10 +378,10 @@ if __name__ == "__main__":
     
     # Initialiser le déplacement de la caméra
     camera_deplacement = CameraDeplacement(
-        p_horizontal=30.0,
+        p_horizontal=5.0,
         i_horizontal=0.01,
         d_horizontal=0.2,
-        p_vertical=15.0,
+        p_vertical=5.0,
         i_vertical=0.01,
         d_vertical=0.1,
         dead_zone=0.02
@@ -395,3 +398,5 @@ if __name__ == "__main__":
 
     # Lancement de l'application GStreamer
     app.run()
+
+#Fin de detection.py
