@@ -28,7 +28,7 @@ from hailo_rpi_common import (
     app_callback_class,
 )
 from detection_pipeline import GStreamerDetectionApp
-from deepsort_tracker import DeepSORTTracker  # Importing the DeepSORT tracker
+from Kalman_Filter import SORT  # Importing the SORT tracker
 
 # =============================
 # ========= CONSTANTES ========
@@ -67,8 +67,8 @@ class user_app_callback_class(app_callback_class):
         # Centres courants (bruts) de toutes les bbox
         self.bbox_centers = []
 
-        # === DEEPSORT TRACKER ===
-        self.tracker = DeepSORTTracker()  # Initialize the DeepSORT tracker
+        # === SORT TRACKER ===
+        self.tracker = SORT(max_age=30, min_hits=3, iou_threshold=0.3)  # Initialize the SORT tracker
 
         # === TRACK SELECTOR ===
         self.track_selector = TrackSelector()
@@ -110,29 +110,38 @@ def app_callback(pad, info, user_data):
     # Mise à jour de la liste des centres
     calc_bbox_centers(user_data, CONFIDENCE_THRESHOLD)
 
-    # === DEEPSORT TRACKER ===
-    # Convert detections to a format suitable for DeepSORT
+    # === SORT TRACKER ===
+    # Convert detections to a format suitable for SORT
     detection_bboxes = []
     for d in detections:
         if d.get_label() in TRACK_OBJECTS and d.get_confidence() >= CONFIDENCE_THRESHOLD:
             bbox = d.get_bbox()
-            detection_bboxes.append([bbox.xmin(), bbox.ymin(), bbox.xmax(), bbox.ymax()])
-
+            # Conversion des coordonnées normalisées en coordonnées absolues
+            xmin_abs = bbox.xmin() * width
+            ymin_abs = bbox.ymin() * height
+            xmax_abs = bbox.xmax() * width
+            ymax_abs = bbox.ymax() * height
+            detection_bboxes.append([xmin_abs, ymin_abs, xmax_abs, ymax_abs])
+    print(f"Détections actuelles : {detection_bboxes}")
     # Update the tracker with the current detections
     user_data.tracker.update(detection_bboxes)
 
     # Retrieve the current tracks
     tracks = user_data.tracker.get_tracks()
-
+    print(f"Nombre de pistes actives : {len(tracks)}")
+    for track in tracks:
+        print(f"Track ID: {track.id}, State: {track.get_state()}")
     # Mettre à jour le TrackSelector
     user_data.track_selector.update_tracks(tracks)
 
     # Obtenir le centre du track sélectionné
-    selected_center = user_data.track_selector.get_selected_track_center()
+    selected_center = user_data.track_selector.get_selected_track_center(
+        width=user_data.width, 
+        height=user_data.height
+    )
     if selected_center:
         user_data.camera_controller.update_center(selected_center)
-
-
+        
     return Gst.PadProbeReturn.OK
 
 
@@ -202,7 +211,8 @@ def draw_overlay(cairooverlay, cr, timestamp, duration, user_data):
     # Dessin des tracks en vert
     cr.set_source_rgb(0, 1, 0)  # Vert
     for track in user_data.tracker.get_tracks():
-        center_x, center_y = track.center
+        center_x, center_y = track.get_center(user_data.width, user_data.height)
+        print(f"[DISPLAY] Track ID={track.id}, center_x={round(center_x, 4)},center_y={round(center_y, 4)}")
         # print(f"[DISPLAY] Track ID={track.track_id}, center_x={round(center_x, 4)},center_y={round(center_y, 4)}")
         bx_f = center_x * width
         by_f = center_y * height
@@ -210,10 +220,10 @@ def draw_overlay(cairooverlay, cr, timestamp, duration, user_data):
         cr.fill()
 
         # Draw track ID above the bounding box
-        track_id = str(track.track_id)
+        track.id = str(track.id)
         # print(f"Track ID {track_id} : {track.bbox}")
         cr.move_to(bx_f + 10 , by_f + 10)  # Position text above the bounding box
-        cr.show_text(track_id)
+        cr.show_text(track.id)
 
 # =============================
 # ======= TRACK SELECTOR ======
@@ -242,10 +252,10 @@ class TrackSelector:
             return
 
         # Trier les tracks par ID croissant (supposant que les IDs augmentent avec le temps)
-        sorted_tracks = sorted(self.tracks, key=lambda t: t.track_id)
-        self.selected_track_id = sorted_tracks[0].track_id
+        sorted_tracks = sorted(self.tracks, key=lambda t: int(t.id))
+        self.selected_track_id = sorted_tracks[0].id
 
-    def get_selected_track_center(self):
+    def get_selected_track_center(self, width, height):
         """
         Retourne le centre normalisé du track sélectionné.
         """
@@ -254,9 +264,11 @@ class TrackSelector:
                 return None
 
             for track in self.tracks:
-                if track.track_id == self.selected_track_id:
-                    return track.center
+                if track.id == self.selected_track_id:
+                    # Appeler la méthode get_center pour récupérer les coordonnées normalisées
+                    return track.get_center(width, height)
             return None
+
 
 # ========================================
 # =========== PILOTAGE CAMERA ============
@@ -494,10 +506,10 @@ if __name__ == "__main__":
     
     # Initialiser le déplacement de la caméra
     camera_deplacement = CameraDeplacement(
-        p_horizontal=30.0,
+        p_horizontal=5.0,
         i_horizontal=0.01,
         d_horizontal=0.2,
-        p_vertical=15.0,
+        p_vertical=5.0,
         i_vertical=0.01,
         d_vertical=0.1,
         dead_zone=0.05
