@@ -34,7 +34,7 @@ class KalmanFilter2D:
         ], dtype=np.float32)
 
         # Incertitude du modèle (Q) et bruit de mesure (R)
-        self.Q = np.eye(4, dtype=np.float32) * 2
+        self.Q = np.eye(4, dtype=np.float32) * 5
         self.R = np.eye(2, dtype=np.float32) * 50
 
         # Matrices de covariance (P)
