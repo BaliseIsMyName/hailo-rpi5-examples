@@ -74,7 +74,7 @@ class user_app_callback_class(app_callback_class):
         self.track_selector = TrackSelector()
 
         # === CAMERA CONTROLLER ===
-        self.camera_controller = CameraController(camera_deplacement)
+        self.camera_controller = None  # Initialisé dans le main
         
         self.current_fps = 0.0
         self.current_droprate = 0.0
@@ -120,19 +120,31 @@ def app_callback(pad, info, user_data):
 
     # Update the tracker with the current detections
     user_data.tracker.update(detection_bboxes)
-
+    
     # Retrieve the current tracks
     tracks = user_data.tracker.get_tracks()
-
-    # Mettre à jour le TrackSelector
-    user_data.track_selector.update_tracks(tracks)
-
-    # Obtenir le centre du track sélectionné
-    selected_center = user_data.track_selector.get_selected_track_center()
+    
+    # Récupérer les pistes actives (time_since_update == 0)
+    active_tracks = user_data.tracker.get_tracks()
+    # print(f"Tracks récupérés: {[t.track_id for t in active_tracks]}")  # Log des IDs des pistes
+    # Ajouter des logs pour vérifier les attributs des tracks
+    # for track in active_tracks:
+    #     print(f"Track ID: {track.track_id}, Center: {track.center}, Time Since Update: {track.time_since_update}")
+        
+    # Mettre à jour le TrackSelector avec les tracks actifs
+    # print("[app_callback] Appel de update_tracks avec les tracks actifs.")
+    user_data.track_selector.update_tracks(active_tracks)
+    # print("[app_callback] update_tracks appelée.")
+        
+    # Obtenir le centre et time_since_update du track sélectionné
+    selected_center, time_since_update = user_data.track_selector.get_selected_track_info()
     if selected_center:
-        user_data.camera_controller.update_center(selected_center)
-
-
+        # print(f"Centre sélectionné: {selected_center}, Time Since Update: {time_since_update}")  # Log du centre et du temps
+        user_data.camera_controller.update_info(selected_center, time_since_update)
+    else:
+        # print("Aucun centre sélectionné. Réinitialisation si nécessaire.")  # Log quand aucune piste active
+        user_data.camera_controller.update_info(None, None)
+ 
     return Gst.PadProbeReturn.OK
 
 
@@ -169,7 +181,9 @@ def calc_bbox_centers(user_data, confidence_threshold=CONFIDENCE_THRESHOLD):
         cy_norm = round(center_y, 4)
         user_data.bbox_centers.append((cx_norm, cy_norm))
 
-
+# ====================================================
+# ======= AFFICHAGE DES POINTS DE CENTRE ET IDs ======
+# ====================================================
 def draw_overlay(cairooverlay, cr, timestamp, duration, user_data):
     """
     Affiche la zone morte (cercle) + le(s) barycentre(s) (point rouge) si dispo.
@@ -206,6 +220,10 @@ def draw_overlay(cairooverlay, cr, timestamp, duration, user_data):
         # print(f"[DISPLAY] Track ID={track.track_id}, center_x={round(center_x, 4)},center_y={round(center_y, 4)}")
         bx_f = center_x * width
         by_f = center_y * height
+        if track.time_since_update > 0:
+            cr.set_source_rgb(1, 1, 0)  # jaune pour les tracks inactifs
+        else:
+            cr.set_source_rgb(0, 1, 0)  # Vert pour actif
         cr.arc(bx_f, by_f, 4, 0, 2 * 3.14159)
         cr.fill()
 
@@ -229,6 +247,7 @@ class TrackSelector:
         self.lock = threading.Lock()
 
     def update_tracks(self, tracks):
+        # print("[TrackSelector] update_tracks appelée avec les tracks:", [t.track_id for t in tracks])
         with self.lock:
             self.tracks = tracks
             self.select_track()
@@ -237,26 +256,32 @@ class TrackSelector:
         """
         Sélectionne le track à suivre. Ici, on choisit le track avec l'ID le plus bas (le plus ancien).
         """
+        # print(f'tracks: {self.tracks}')
         if not self.tracks:
             self.selected_track_id = None
+            # print("[TrackSelector] Aucun track actif trouvé.")
             return
 
         # Trier les tracks par ID croissant (supposant que les IDs augmentent avec le temps)
         sorted_tracks = sorted(self.tracks, key=lambda t: t.track_id)
         self.selected_track_id = sorted_tracks[0].track_id
+        # print(f"[TrackSelector] Track actif sélectionné ID={self.selected_track_id}")
 
-    def get_selected_track_center(self):
+    def get_selected_track_info(self):
         """
         Retourne le centre normalisé du track sélectionné.
         """
         with self.lock:
             if self.selected_track_id is None:
-                return None
+                # print("[TrackSelector] Aucun track sélectionné.")
+                return None, None
 
             for track in self.tracks:
                 if track.track_id == self.selected_track_id:
-                    return track.center
-            return None
+                    # print(f"[TrackSelector] Track sélectionné ID={track.track_id}, Center={track.center}, Time Since Update={track.time_since_update}")
+                    return track.center, track.time_since_update
+            # print("[TrackSelector] Track sélectionné non trouvé dans les tracks actuels.")
+            return None, None
 
 # ========================================
 # =========== PILOTAGE CAMERA ============
@@ -388,7 +413,7 @@ class CameraDeplacement:
         new_horizontal_angle = self.servo_horizontal.current_angle + x_correction
         new_horizontal_angle = max(self.horizontal_min_angle,
                                    min(self.horizontal_max_angle, new_horizontal_angle))
-
+        # print(f"[CameraDeplacement] Nouvelle angle horizontal: {new_horizontal_angle}")
         self.servo_horizontal.set_servo_angle(new_horizontal_angle)
 
         # Erreur sur Y => angle vertical
@@ -396,7 +421,7 @@ class CameraDeplacement:
         new_vertical_angle = self.servo_vertical.current_angle + y_correction
         new_vertical_angle = max(self.vertical_min_angle,
                                  min(self.vertical_max_angle, new_vertical_angle))
-
+        # print(f"[CameraDeplacement] Nouvelle angle vertical: {new_vertical_angle}")
         self.servo_vertical.set_servo_angle(new_vertical_angle)
 
     def position_zero(self):
@@ -432,25 +457,39 @@ class CameraController:
     def __init__(self, camera_deplacement):
         self.camera_deplacement = camera_deplacement
         self.current_center = None
+        self.time_since_update = None  # Initialiser
         self.lock = threading.Lock()
         self.running = True
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
-    def update_center(self, center):
+    def update_info(self, center, time_since_update):
         with self.lock:
             self.current_center = center
+            self.time_since_update = time_since_update
 
     def run(self):
         while self.running:
             with self.lock:
                 center = self.current_center
-            if center:
+                time_since_update = self.time_since_update
+
+            if center is not None and time_since_update == 0:
+                # print(f"Camera moving to center: {center}")
                 x_center, y_center = center
                 # Vérifier si l'objet est en dehors de la zone morte
                 if (abs(x_center - 0.5) > self.camera_deplacement.dead_zone or
                     abs(y_center - 0.5) > self.camera_deplacement.dead_zone):
+                    # print(f"[CameraController] Objet hors zone morte: x={x_center}, y={y_center}")
                     self.camera_deplacement.update_position(x_center, y_center)
+                else:
+                    # print("Objet dans la zone morte, les servomoteurs restent en position.")
+                    self.camera_deplacement.update_position(0.5, 0.5)
+            else:
+                # print("Aucune piste active détectée ou track inactif. Les servomoteurs restent en position actuelle.")
+                # Définir le centre par défaut pour stabiliser les servomoteurs
+                self.camera_deplacement.update_position(0.5, 0.5)
+            
             time.sleep(0.1)  # Ajuster la fréquence selon les besoins
 
     def stop(self):
