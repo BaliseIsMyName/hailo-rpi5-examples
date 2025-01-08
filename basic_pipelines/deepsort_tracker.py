@@ -35,8 +35,8 @@ class KalmanFilterBBOX:
         ], dtype=np.float32)
 
         # Bruit du modèle et de la mesure
-        self.Q = np.eye(6, dtype=np.float32) * 0.3
-        self.R = np.eye(4, dtype=np.float32) * 3
+        self.Q = np.eye(6, dtype=np.float32) * 1
+        self.R = np.eye(4, dtype=np.float32) * 5
 
         # Matrice de covariance (P)
         self.P = np.eye(6, dtype=np.float32)

@@ -1,26 +1,26 @@
-#detection.py
+# detection.py
+
+import signal
+import sys
+import threading
+import time
+import subprocess
+from typing import Any, List, Optional, Tuple
+import yaml
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+import os
+
+import board
+import busio
+from adafruit_pca9685 import PCA9685
 
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib, GObject
-import os
-import numpy as np
-import matplotlib.pyplot as plt
-import cv2
-import hailo
-import threading
-import time
-import subprocess
-import socket
-import json
-import cairo
-import signal
-import sys
 
-# Imports PCA9685 & co
-import board
-import busio
-from adafruit_pca9685 import PCA9685
+import cairo
+import hailo
 
 from hailo_rpi_common import (
     get_caps_from_pad,
@@ -28,131 +28,763 @@ from hailo_rpi_common import (
     app_callback_class,
 )
 from detection_pipeline import GStreamerDetectionApp
-from deepsort_tracker import DeepSORTTracker  # Importing the DeepSORT tracker
+from deepsort_tracker import DeepSORTTracker
+
+import logging
+from dataclasses import dataclass, field
+
+# Configuration du logger
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s: %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # =============================
 # ========= CONSTANTES ========
 # =============================
 
-TRACK_OBJECTS = ["person", "cat"]   # Labels à suivre
-CONFIDENCE_THRESHOLD = 0.5          # Seuil de confiance min
-DEAD_ZONE = 0.05                    # Zone morte (en fraction de l'image)
-# Flag pour indiquer si l'application doit s'arrêter
-should_exit = False
+# Couleurs utilisées dans l'overlay
+COLOR_BLUE: Tuple[float, float, float] = (0, 0, 1)
+COLOR_RED: Tuple[float, float, float] = (1, 0, 0)
+COLOR_GREEN: Tuple[float, float, float] = (0, 1, 0)
+COLOR_YELLOW: Tuple[float, float, float] = (1, 1, 0)
 
-def signal_handler(signum, frame):
-    global should_exit
-    print(f"Signal {signum} reçu. Fermeture de l'application...")
-    should_exit = True
-    quit_app(should_exit)
-    
-def quit_app(should_exit):
-    if should_exit:
-        print("Arrêt de l'application...")
-        user_data.camera_controller.stop()
-        user_data.camera_controller.camera_deplacement.position_zero()
-        user_data.camera_controller.camera_deplacement.cleanup_servo()
-        app.shutdown()  # Arrêter le GLib.MainLoop
+@dataclass
+class DetectionAppState:
+    should_exit: bool = False
+    user_data: Any = field(default=None)
+
+# =============================
+# ======= TRACK SELECTOR ======
+# =============================
+class TrackSelector:
+    """
+    Sélectionne quel track suivre en fonction des critères définis.
+    Par exemple, suit le track avec l'ID le plus ancien.
+    """
+
+    def __init__(self) -> None:
+        self.tracks: List[Any] = []
+        self.selected_track_id: Optional[int] = None
+        self.lock: threading.Lock = threading.Lock()
+
+    def update_tracks(self, tracks: List[Any]) -> None:
+        with self.lock:
+            self.tracks = tracks
+            self.select_track()
+
+    def select_track(self) -> None:
+        """
+        Sélectionne le track à suivre. Ici, on choisit le track avec l'ID le plus bas (le plus ancien).
+        """
+        if not self.tracks:
+            self.selected_track_id = None
+            logger.debug("[TrackSelector] Aucun track actif trouvé.")
+            return
+
+        # Trier les tracks par ID croissant
+        sorted_tracks = sorted(self.tracks, key=lambda t: t.track_id)
+        self.selected_track_id = sorted_tracks[0].track_id
+        logger.debug(f"[TrackSelector] Track actif sélectionné ID={self.selected_track_id}")
+
+    def get_selected_track_info(self) -> Tuple[Optional[Tuple[float, float]], Optional[int]]:
+        """
+        Retourne le centre normalisé du track sélectionné.
+        """
+        with self.lock:
+            if self.selected_track_id is None:
+                logger.debug("[TrackSelector] Aucun track sélectionné.")
+                return None, None
+
+            for track in self.tracks:
+                if track.track_id == self.selected_track_id:
+                    return track.center, track.time_since_update
+
+            logger.debug("[TrackSelector] Track sélectionné non trouvé dans les tracks actuels.")
+            return None, None
+
+# ===================================
+# ========= PILOTAGE CAMERA =========
+# ===================================
+class PID:
+    """
+    Contrôleur PID simple.
+    """
+
+    def __init__(
+        self, 
+        kp: float = 1.0, 
+        ki: float = 0.0, 
+        kd: float = 0.0, 
+        setpoint: float = 0.5, 
+        output_limits: Tuple[float, float] = (-999, 999)
+    ) -> None:
+        self.kp: float = kp
+        self.ki: float = ki
+        self.kd: float = kd
+        self.setpoint: float = setpoint
+        self.output_limits: Tuple[float, float] = output_limits
+        self._integral: float = 0.0
+        self._last_error: float = 0.0
+        self._last_time: float = time.time()
+
+    def reset(self) -> None:
+        self._integral = 0.0
+        self._last_error = 0.0
+        self._last_time = time.time()
+
+    def update(self, measurement: float) -> float:
+        now: float = time.time()
+        dt: float = now - self._last_time
+        if dt <= 0.0:
+            dt = 1e-16
+
+        error: float = self.setpoint - measurement
+        p_out: float = self.kp * error
+        self._integral += error * dt
+        i_out: float = self.ki * self._integral
+        derivative: float = (error - self._last_error) / dt
+        d_out: float = self.kd * derivative
+
+        output: float = p_out + i_out + d_out
+        min_out, max_out = self.output_limits
+        output = max(min_out, min(output, max_out))
+
+        self._last_error = error
+        self._last_time = now
+
+        logger.debug(f"PID Update -> Error: {error}, P: {p_out}, I: {i_out}, D: {d_out}, Output: {output}")
+        return output
+
+# ===================================
+# ======= CAMERA SERVOCONTROLLER =====
+# ===================================
+class ServoController:
+    """
+    Contrôleur pour un servo-moteur via PCA9685.
+    """
+
+    def __init__(
+        self,
+        channel: int = 0,
+        freq: int = 50,
+        i2c_address: int = 0x40,
+        servo_min_us: int = 500,
+        servo_max_us: int = 2500,
+        max_angle: int = 180
+    ) -> None:
+        i2c = busio.I2C(board.SCL, board.SDA)
+        self.pca: PCA9685 = PCA9685(i2c, address=i2c_address)
+        self.pca.frequency = freq
+
+        self.channel: int = channel
+        self.servo_min_us: int = servo_min_us
+        self.servo_max_us: int = servo_max_us
+        self.max_angle: int = max_angle
+
+        self.current_angle: float = max_angle / 2.0
+        self.set_servo_angle(self.current_angle)
+
+    def _us_to_duty_cycle(self, pulse_us: int) -> int:
+        period_us: int = 1_000_000 // self.pca.frequency  # ex: 20_000µs @ 50Hz
+        duty_cycle: int = int((pulse_us / period_us) * 65535)
+        return max(0, min(65535, duty_cycle))
+
+    def set_servo_angle(self, angle_deg: float) -> None:
+        angle_clamped: float = max(0, min(self.max_angle, angle_deg))
+        self.current_angle = angle_clamped
+
+        span_us: int = self.servo_max_us - self.servo_min_us
+        pulse_us: float = self.servo_min_us + (span_us * (angle_clamped / float(self.max_angle)))
+        self.pca.channels[self.channel].duty_cycle = self._us_to_duty_cycle(int(pulse_us))
+
+        logger.debug(f"Servo Channel {self.channel} Angle set to {self.current_angle}° (Pulse: {pulse_us}µs)")
+
+    def cleanup(self) -> None:
+        # self.pca.channels[self.channel].duty_cycle = 0
+        self.pca.deinit()
+        logger.info(f"Servo Channel {self.channel} cleanup completed.")
+
+# ===================================
+# ======= CAMERA DEPLACEMENT ========
+# ===================================
+class CameraDeplacement:
+    """
+    Gère deux servos (horizontal + vertical) avec 2 PID.
+    """
+
+    def __init__(
+        self,
+        p_horizontal: float = 1.0,
+        i_horizontal: float = 0.0,
+        d_horizontal: float = 0.0,
+        p_vertical: float = 1.0,
+        i_vertical: float = 0.0,
+        d_vertical: float = 0.0,
+        dead_zone: float = 0.05,
+        vertical_min_angle: int = 45,
+        vertical_max_angle: int = 135,
+        horizontal_min_angle: int = 0,
+        horizontal_max_angle: int = 270
+    ) -> None:
+        self.servo_horizontal: ServoController = ServoController(
+            channel=config.get("servo", {}).get("channel_horizontal", 0),
+            max_angle=config.get("servo", {}).get("max_angle_horizontal", 270),
+            freq=config.get("servo", {}).get("freq", 50),
+            i2c_address=config.get("servo", {}).get("i2c_address", 0x40),
+            servo_min_us=config.get("servo", {}).get("servo_min_us", 500),
+            servo_max_us=config.get("servo", {}).get("servo_max_us", 2500)
+        )
+        self.servo_vertical: ServoController = ServoController(
+            channel=config.get("servo", {}).get("channel_vertical", 1),
+            max_angle=config.get("servo", {}).get("max_angle_vertical", 180),
+            freq=config.get("servo", {}).get("freq", 50),
+            i2c_address=config.get("servo", {}).get("i2c_address", 0x40),
+            servo_min_us=config.get("servo", {}).get("servo_min_us", 500),
+            servo_max_us=config.get("servo", {}).get("servo_max_us", 2500)
+        )
+
+        self.pid_x: PID = PID(
+            kp=config.get("pid", {}).get("horizontal", {}).get("kp", 1.0),
+            ki=config.get("pid", {}).get("horizontal", {}).get("ki", 0.0),
+            kd=config.get("pid", {}).get("horizontal", {}).get("kd", 0.0),
+            setpoint=0.5,
+            output_limits=(-150, 150)
+        )
+        self.pid_y: PID = PID(
+            kp=config.get("pid", {}).get("vertical", {}).get("kp", 1.0),
+            ki=config.get("pid", {}).get("vertical", {}).get("ki", 0.0),
+            kd=config.get("pid", {}).get("vertical", {}).get("kd", 0.0),
+            setpoint=0.5,
+            output_limits=(-50, 50)
+        )
+
+        self.dead_zone: float = dead_zone
+        self.horizontal_min_angle: int = config.get("camera_movement", {}).get("horizontal_min_angle", 0)
+        self.horizontal_max_angle: int = config.get("camera_movement", {}).get("horizontal_max_angle", 270)
+        self.vertical_min_angle: int = config.get("camera_movement", {}).get("vertical_min_angle", 45)
+        self.vertical_max_angle: int = config.get("camera_movement", {}).get("vertical_max_angle", 135)
+
+    def update_position(self, x_center: float, y_center: float) -> None:
+        """
+        Mise à jour des servos en fonction de x_center et y_center (normalisés entre 0 et 1).
+        """
+        # Correction pour l'axe X
+        x_correction: float = self.pid_x.update(x_center)
+        new_horizontal_angle: float = self.servo_horizontal.current_angle + x_correction
+        new_horizontal_angle = max(
+            self.horizontal_min_angle,
+            min(self.horizontal_max_angle, new_horizontal_angle)
+        )
+        self.servo_horizontal.set_servo_angle(new_horizontal_angle)
+
+        # Correction pour l'axe Y
+        y_correction: float = self.pid_y.update(y_center)
+        new_vertical_angle: float = self.servo_vertical.current_angle + y_correction
+        new_vertical_angle = max(
+            self.vertical_min_angle,
+            min(self.vertical_max_angle, new_vertical_angle)
+        )
+        self.servo_vertical.set_servo_angle(new_vertical_angle)
+
+        logger.debug(f"Camera Position Updated -> Horizontal: {new_horizontal_angle}°, Vertical: {new_vertical_angle}°")
+
+    def position_zero(self) -> None:
+        """
+        Place la caméra à une position de référence.
+        """
+        self.servo_horizontal.set_servo_angle(self.horizontal_max_angle / 2)
+        self.servo_vertical.set_servo_angle((self.vertical_min_angle + self.vertical_max_angle) / 2)
+        time.sleep(1)
+        logger.info("Camera positioned to zero.")
+
+    def position_turn(self) -> None:
+        """
+        Effectue un mouvement de balayage de la caméra.
+        """
+        self.servo_horizontal.set_servo_angle(self.horizontal_min_angle)
+        self.servo_vertical.set_servo_angle(self.vertical_min_angle)
+        time.sleep(1)
+        self.servo_horizontal.set_servo_angle(self.horizontal_max_angle)
+        self.servo_vertical.set_servo_angle(self.vertical_max_angle)
+        time.sleep(1)
+        self.position_zero()
+        logger.info("Camera performed turn sweep.")
+
+    def cleanup_servo(self) -> None:
+        """
+        Nettoie les ressources des servos et réinitialise les PID.
+        """
+        self.servo_horizontal.cleanup()
+        self.servo_vertical.cleanup()
+        self.pid_x.reset()
+        self.pid_y.reset()
+        logger.info("Camera deplacement cleanup completed.")
+
+# ===================================
+# ======= CAMERA CONTROLLER ========
+# ===================================
+class CameraController:
+    """
+    Pilote la caméra en fonction des coordonnées fournies.
+    """
+
+    def __init__(self, camera_deplacement: CameraDeplacement) -> None:
+        self.camera_deplacement: CameraDeplacement = camera_deplacement
+        self.current_center: Optional[Tuple[float, float]] = None
+        self.time_since_update: Optional[int] = None
+        self.lock: threading.Lock = threading.Lock()
+        self.running: bool = True
+        self.enable_movement: bool = CAMERA_MOVEMENT_ENABLE
+        self.thread: threading.Thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+        logger.info("CameraController thread started.")
+
+    def set_enable_movement(self, enable: bool) -> None:
+        with self.lock:
+            self.enable_movement = enable
+            logger.info(f"CameraController movement enabled: {enable}")
+            
+    def update_info(self, center: Optional[Tuple[float, float]], time_since_update: Optional[int]) -> None:
+        with self.lock:
+            self.current_center = center
+            self.time_since_update = time_since_update
+            logger.debug(f"CameraController updated info -> Center: {center}, Time Since Update: {time_since_update}")
+
+    def run(self) -> None:
+        while self.running:
+            with self.lock:
+                center = self.current_center
+                time_since_update = self.time_since_update
+                enable_movement = self.enable_movement  # Récupérer l'état d'activation
+                
+            if enable_movement:
+                if center is not None and time_since_update == 0:
+                    x_center, y_center = center
+                    # Vérifier si l'objet est en dehors de la zone morte
+                    if (abs(x_center - 0.5) > self.camera_deplacement.dead_zone or
+                            abs(y_center - 0.5) > self.camera_deplacement.dead_zone):
+                        self.camera_deplacement.update_position(x_center, y_center)
+                    else:
+                        # Stabiliser les servomoteurs
+                        self.camera_deplacement.update_position(0.5, 0.5)
+                else:
+                    # Stabiliser les servomoteurs
+                    self.camera_deplacement.update_position(0.5, 0.5)
+            else:
+                # Si les mouvements sont désactivés, maintenir la caméra en position zéro
+                self.camera_deplacement.update_position(0.5, 0.5)
+
+            time.sleep(0.1)  # Ajuster la fréquence selon les besoins
+
+    def stop(self) -> None:
+        self.running = False
+        self.thread.join()
+        logger.info("CameraController thread stopped.")
 
 # ========================================
 # =========== USER APP CALLBACK ==========
 # ========================================
-class user_app_callback_class(app_callback_class):
-    def __init__(self):
-        super().__init__()
-        self.last_detections = []
-        self.width = None
-        self.height = None
-
-        # Centres courants (bruts) de toutes les bbox
-        self.bbox_centers = []
-
-        # === DEEPSORT TRACKER ===
-        self.tracker = DeepSORTTracker()  # Initialize the DeepSORT tracker
-
-        # === TRACK SELECTOR ===
-        self.track_selector = TrackSelector()
-
-        # === CAMERA CONTROLLER ===
-        self.camera_controller = None  # Initialisé dans le main
-        
-        self.current_fps = 0.0
-        self.current_droprate = 0.0
-        self.avg_fps = 0.0
-        
-        self.detection_event = threading.Event()
-        self.lock = threading.Lock()
-
-        self.dead_zone = DEAD_ZONE
-
-
-# This is the callback function that will be called when data is available from the pipeline
-def app_callback(pad, info, user_data):
-    # Get the GstBuffer from the probe info
-    buffer = info.get_buffer()
-    if buffer is None:
-        return Gst.PadProbeReturn.OK
-
-    # Compter les frames
-    user_data.increment()
-
-    # Récupération width/height
-    format, width, height = get_caps_from_pad(pad)
-    if width is not None and height is not None:
-        user_data.width = width
-        user_data.height = height
-
-    # Récupérer les détections
-    roi = hailo.get_roi_from_buffer(buffer)
-    detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
-    user_data.last_detections = detections
-    
-    # Mise à jour de la liste des centres
-    calc_bbox_centers(user_data, CONFIDENCE_THRESHOLD)
-
-    # === DEEPSORT TRACKER ===
-    # Convert detections to a format suitable for DeepSORT
-    detection_bboxes = []
-    for d in detections:
-        if d.get_label() in TRACK_OBJECTS and d.get_confidence() >= CONFIDENCE_THRESHOLD:
-            bbox = d.get_bbox()
-            detection_bboxes.append([bbox.xmin(), bbox.ymin(), bbox.xmax(), bbox.ymax()])
-
-    # Update the tracker with the current detections
-    user_data.tracker.update(detection_bboxes)
-    
-    # Retrieve the current tracks
-    tracks = user_data.tracker.get_tracks()
-    
-    # Récupérer les pistes actives (time_since_update == 0)
-    active_tracks = user_data.tracker.get_tracks()
-    # print(f"Tracks récupérés: {[t.track_id for t in active_tracks]}")  # Log des IDs des pistes
-    # Ajouter des logs pour vérifier les attributs des tracks
-    # for track in active_tracks:
-    #     print(f"Track ID: {track.track_id}, Center: {track.center}, Time Since Update: {track.time_since_update}")
-        
-    # Mettre à jour le TrackSelector avec les tracks actifs
-    # print("[app_callback] Appel de update_tracks avec les tracks actifs.")
-    user_data.track_selector.update_tracks(active_tracks)
-    # print("[app_callback] update_tracks appelée.")
-        
-    # Obtenir le centre et time_since_update du track sélectionné
-    selected_center, time_since_update = user_data.track_selector.get_selected_track_info()
-    if selected_center:
-        # print(f"Centre sélectionné: {selected_center}, Time Since Update: {time_since_update}")  # Log du centre et du temps
-        user_data.camera_controller.update_info(selected_center, time_since_update)
-    else:
-        # print("Aucun centre sélectionné. Réinitialisation si nécessaire.")  # Log quand aucune piste active
-        user_data.camera_controller.update_info(None, None)
- 
-    return Gst.PadProbeReturn.OK
-
-
-def calc_bbox_centers(user_data, confidence_threshold=CONFIDENCE_THRESHOLD):
+class UserAppCallback(app_callback_class):
     """
-    Parcourt user_data.last_detections pour calculer et stocker DANS user_data.bbox_centers
-    les centres (normalisés 0..1) de toutes les bounding boxes valides 
-    (label suivi, conf >= threshold).
+    Classe de rappel utilisateur pour gérer les détections et le suivi.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_detections: List[hailo.HAILO_DETECTION] = []
+        self.width: Optional[int] = None
+        self.height: Optional[int] = None
+        self.bbox_centers: List[Tuple[float, float]] = []
+        self.tracker: DeepSORTTracker = DeepSORTTracker()
+        self.track_selector: TrackSelector = TrackSelector()
+        self.camera_controller: Optional[CameraController] = None  # Initialisé dans le main
+        self.current_fps: float = 0.0
+        self.current_droprate: float = 0.0
+        self.avg_fps: float = 0.0
+        self.detection_event: threading.Event = threading.Event()
+        self.lock: threading.Lock = threading.Lock()
+        self.dead_zone: float = DEAD_ZONE
+
+# =============================
+# ======= CONFIGURATION ========
+# =============================
+def load_config(config_path: str = "config.yaml") -> dict:
+    """
+    Charge la configuration depuis un fichier YAML.
+
+    Args:
+        config_path (str): Nom du fichier de configuration.
+
+    Returns:
+        dict: Dictionnaire contenant les configurations.
+    """
+    try:
+        # Obtenir le chemin absolu basé sur l'emplacement du script
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        absolute_config_path = os.path.join(script_dir, config_path)
+
+        # Ajoutez une ligne de diagnostic pour vérifier le chemin
+        logger.debug(f"Chemin absolu du fichier de configuration: {absolute_config_path}")
+
+        with open(absolute_config_path, 'r') as file:
+            config = yaml.safe_load(file)
+            logger.info(f"Configuration chargée depuis {absolute_config_path}")
+            return config
+    except FileNotFoundError:
+        logger.error(f"Fichier de configuration {absolute_config_path} non trouvé.")
+        sys.exit(1)
+    except yaml.YAMLError as exc:
+        logger.error(f"Erreur lors du chargement du fichier YAML: {exc}")
+        sys.exit(1)
+
+# Chargement initial de la configuration
+config = load_config("config.yaml")
+
+# Variables de configuration
+TRACK_OBJECTS: List[str] = config.get("track_objects", ["person", "cat"])
+CONFIDENCE_THRESHOLD: float = config.get("confidence_threshold", 0.5)
+DEAD_ZONE: float = config.get("dead_zone", 0.05)
+
+# PID Parameters
+PID_HORIZONTAL = config.get("pid", {}).get("horizontal", {})
+PID_VERTICAL = config.get("pid", {}).get("vertical", {})
+
+# Servo Parameters
+SERVO_CONFIG = config.get("servo", {})
+
+# Camera Movement Parameters
+CAMERA_MOVEMENT = config.get("camera_movement", {})
+CAMERA_MOVEMENT_ENABLE: bool = CAMERA_MOVEMENT.get("enable", True)
+
+
+# Window Mover Parameters
+WINDOW_MOVER_CONFIG = config.get("window_mover", {})
+
+# =============================
+# ======= EVENT CONFIG FILE ======
+# =============================
+class ConfigHandler(FileSystemEventHandler):
+    """
+    Gestionnaire d'événements pour les modifications du fichier de configuration.
+    """
+    def __init__(self, config_path: str, reload_callback):
+        super().__init__()
+        self.config_path = os.path.abspath(config_path)  # Utiliser un chemin absolu
+        self.reload_callback = reload_callback
+
+    def on_modified(self, event):
+        event_path = os.path.abspath(event.src_path)
+        if event_path == self.config_path:
+            self.reload_callback()
+
+# =============================
+# ======= RUN WATCHER =========
+# =============================
+def start_config_watcher(config_path: str, reload_callback) -> None:
+    """
+    Démarre un observateur pour surveiller les modifications du fichier de configuration.
+
+    Args:
+        config_path (str): Chemin vers le fichier de configuration.
+        reload_callback (callable): Fonction à appeler pour recharger la configuration.
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    absolute_config_path = os.path.join(script_dir, config_path)
+    event_handler = ConfigHandler(absolute_config_path, reload_callback)
+    observer = Observer()
+    observer.schedule(event_handler, path=script_dir, recursive=False)  # Surveille le répertoire absolu
+    observer.start()
+    logger.info(f"Observateur de configuration démarré pour {absolute_config_path}.")
+
+    # Garder l'observateur en marche dans un thread séparé
+    def watch():
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            observer.stop()
+        observer.join()
+
+    watch_thread = threading.Thread(target=watch, daemon=True)
+    watch_thread.start()
+
+
+def reload_config(detection_app: 'DetectionApp', config_path: str = "config.yaml") -> None:
+    """
+    Recharge la configuration et met à jour les paramètres de l'application.
+
+    Args:
+        detection_app (DetectionApp): Instance de l'application de détection.
+        config_path (str): Chemin vers le fichier de configuration.
+    """
+    global config, TRACK_OBJECTS, CONFIDENCE_THRESHOLD, DEAD_ZONE, CAMERA_MOVEMENT_ENABLE
+    config = load_config(config_path)
+
+    # Mettre à jour les variables globales
+    TRACK_OBJECTS = config.get("track_objects", ["person", "cat"])
+    CONFIDENCE_THRESHOLD = config.get("confidence_threshold", 0.5)
+    DEAD_ZONE = config.get("dead_zone", 0.05)
+
+    # Mettre à jour l'activation des mouvements de la caméra
+    CAMERA_MOVEMENT = config.get("camera_movement", {})
+    CAMERA_MOVEMENT_ENABLE = CAMERA_MOVEMENT.get("enable", True)
+
+    # Mettre à jour l'état du CameraController
+    if detection_app.state.user_data.camera_controller:
+        detection_app.state.user_data.camera_controller.set_enable_movement(CAMERA_MOVEMENT_ENABLE)
+
+    # Mettre à jour les PID
+    detection_app.state.user_data.camera_controller.camera_deplacement.pid_x.kp = config.get("pid", {}).get("horizontal", {}).get("kp", 1.0)
+    detection_app.state.user_data.camera_controller.camera_deplacement.pid_x.ki = config.get("pid", {}).get("horizontal", {}).get("ki", 0.0)
+    detection_app.state.user_data.camera_controller.camera_deplacement.pid_x.kd = config.get("pid", {}).get("horizontal", {}).get("kd", 0.0)
+
+    detection_app.state.user_data.camera_controller.camera_deplacement.pid_y.kp = config.get("pid", {}).get("vertical", {}).get("kp", 1.0)
+    detection_app.state.user_data.camera_controller.camera_deplacement.pid_y.ki = config.get("pid", {}).get("vertical", {}).get("ki", 0.0)
+    detection_app.state.user_data.camera_controller.camera_deplacement.pid_y.kd = config.get("pid", {}).get("vertical", {}).get("kd", 0.0)
+
+    # Mettre à jour les seuils de zone morte
+    detection_app.state.user_data.dead_zone = config.get("dead_zone", 0.05)
+
+    # Mettre à jour les angles min/max
+    detection_app.state.user_data.camera_controller.camera_deplacement.horizontal_min_angle = config.get("camera_movement", {}).get("horizontal_min_angle", 0)
+    detection_app.state.user_data.camera_controller.camera_deplacement.horizontal_max_angle = config.get("camera_movement", {}).get("horizontal_max_angle", 270)
+    detection_app.state.user_data.camera_controller.camera_deplacement.vertical_min_angle = config.get("camera_movement", {}).get("vertical_min_angle", 45)
+    detection_app.state.user_data.camera_controller.camera_deplacement.vertical_max_angle = config.get("camera_movement", {}).get("vertical_max_angle", 135)
+
+    # Mettre à jour les servos avec les nouvelles configurations
+    detection_app.state.user_data.camera_controller.camera_deplacement.servo_horizontal.channel = config.get("servo", {}).get("channel_horizontal", 0)
+    detection_app.state.user_data.camera_controller.camera_deplacement.servo_vertical.channel = config.get("servo", {}).get("channel_vertical", 1)
+    detection_app.state.user_data.camera_controller.camera_deplacement.servo_horizontal.set_servo_angle(detection_app.state.user_data.camera_controller.camera_deplacement.servo_horizontal.current_angle)
+    detection_app.state.user_data.camera_controller.camera_deplacement.servo_vertical.set_servo_angle(detection_app.state.user_data.camera_controller.camera_deplacement.servo_vertical.current_angle)
+
+    # Appliquer immédiatement les changements si nécessaire
+    logger.info("Configuration rechargée et appliquée.")
+
+# =============================
+# =============== MAIN ===================
+# ========================================
+class DetectionApp:
+    """
+    Classe principale pour gérer l'application de détection.
+    """
+
+    def __init__(self) -> None:
+        self.state: DetectionAppState = DetectionAppState()
+        self.state.user_data = UserAppCallback()
+        self.app: GStreamerDetectionApp = GStreamerDetectionApp(app_callback, self.state.user_data)
+        logger.info("DetectionApp initialisée.")
+
+    def signal_handler(self, signum: int, frame: Any) -> None:
+        logger.info(f"Signal {signum} reçu. Fermeture de l'application...")
+        self.state.should_exit = True
+        self.quit_app()
+
+    def quit_app(self) -> None:
+        if self.state.should_exit:
+            logger.info("Arrêt de l'application...")
+            if self.state.user_data.camera_controller:
+                self.state.user_data.camera_controller.stop()
+                self.state.user_data.camera_controller.camera_deplacement.position_zero()
+                time.sleep(0.5)
+                self.state.user_data.camera_controller.camera_deplacement.cleanup_servo()
+            self.app.shutdown()  # Arrêter le GLib.MainLoop
+
+    def move_window(self) -> None:
+        """
+        Déplace la fenêtre spécifiée dans la configuration aux coordonnées définies.
+        """
+        window_name = WINDOW_MOVER_CONFIG.get("window_name", "Hailo Detection App")
+        move_x = WINDOW_MOVER_CONFIG.get("move_x", 440)
+        move_y = WINDOW_MOVER_CONFIG.get("move_y", 62)
+        max_retries = WINDOW_MOVER_CONFIG.get("max_retries", 10)
+        delay = WINDOW_MOVER_CONFIG.get("delay", 3)
+
+        attempts = 0
+        while attempts < max_retries and not self.state.should_exit:
+            try:
+                window_ids = subprocess.check_output(
+                    ['xdotool', 'search', '--name', window_name]
+                ).decode().strip().split('\n')
+                if window_ids and window_ids[0]:
+                    window_id = window_ids[0]
+                    subprocess.run(['xdotool', 'windowmove', window_id, str(move_x), str(move_y)])
+                    logger.info(f"Fenêtre déplacée : ID {window_id} vers ({move_x}, {move_y})")
+                    return
+                else:
+                    logger.warning(f"Fenêtre '{window_name}' non trouvée, tentative suivante...")
+            except subprocess.CalledProcessError:
+                logger.error(f"Erreur lors de la recherche de la fenêtre '{window_name}', tentative suivante...")
+            attempts += 1
+            time.sleep(delay)
+        logger.error(f"Échec de déplacer la fenêtre '{window_name}' après plusieurs tentatives.")
+
+
+    def move_window_thread(self) -> None:
+        """
+        Thread pour déplacer la fenêtre vidéo.
+        """
+        self.move_window()
+
+    def update_configuration(self, new_config: dict) -> None:
+        """
+        Met à jour les configurations de l'application avec les nouvelles valeurs.
+
+        Args:
+            new_config (dict): Nouveau dictionnaire de configurations.
+        """
+        global TRACK_OBJECTS, CONFIDENCE_THRESHOLD, DEAD_ZONE, CAMERA_MOVEMENT_ENABLE
+        TRACK_OBJECTS = new_config.get("track_objects", ["person", "cat"])
+        CONFIDENCE_THRESHOLD = new_config.get("confidence_threshold", 0.5)
+        DEAD_ZONE = new_config.get("dead_zone", 0.05)
+
+        # Mettre à jour l'activation des mouvements de la caméra
+        CAMERA_MOVEMENT_ENABLE = new_config.get("camera_movement", {}).get("enable", True)
+        if self.state.user_data.camera_controller:
+            self.state.user_data.camera_controller.enable_movement = CAMERA_MOVEMENT_ENABLE
+
+
+        # Mettre à jour les PID
+        self.state.user_data.camera_controller.camera_deplacement.pid_x.kp = new_config.get("pid", {}).get("horizontal", {}).get("kp", 1.0)
+        self.state.user_data.camera_controller.camera_deplacement.pid_x.ki = new_config.get("pid", {}).get("horizontal", {}).get("ki", 0.0)
+        self.state.user_data.camera_controller.camera_deplacement.pid_x.kd = new_config.get("pid", {}).get("horizontal", {}).get("kd", 0.0)
+
+        self.state.user_data.camera_controller.camera_deplacement.pid_y.kp = new_config.get("pid", {}).get("vertical", {}).get("kp", 1.0)
+        self.state.user_data.camera_controller.camera_deplacement.pid_y.ki = new_config.get("pid", {}).get("vertical", {}).get("ki", 0.0)
+        self.state.user_data.camera_controller.camera_deplacement.pid_y.kd = new_config.get("pid", {}).get("vertical", {}).get("kd", 0.0)
+
+        # Mettre à jour les seuils de zone morte
+        self.state.user_data.dead_zone = new_config.get("dead_zone", 0.05)
+
+        # Mettre à jour les angles min/max
+        self.state.user_data.camera_controller.camera_deplacement.horizontal_min_angle = new_config.get("camera_movement", {}).get("horizontal_min_angle", 0)
+        self.state.user_data.camera_controller.camera_deplacement.horizontal_max_angle = new_config.get("camera_movement", {}).get("horizontal_max_angle", 270)
+        self.state.user_data.camera_controller.camera_deplacement.vertical_min_angle = new_config.get("camera_movement", {}).get("vertical_min_angle", 45)
+        self.state.user_data.camera_controller.camera_deplacement.vertical_max_angle = new_config.get("camera_movement", {}).get("vertical_max_angle", 135)
+
+        # Mettre à jour les servos avec les nouvelles configurations
+        self.state.user_data.camera_controller.camera_deplacement.servo_horizontal.channel = new_config.get("servo", {}).get("channel_horizontal", 0)
+        self.state.user_data.camera_controller.camera_deplacement.servo_vertical.channel = new_config.get("servo", {}).get("channel_vertical", 1)
+        self.state.user_data.camera_controller.camera_deplacement.servo_horizontal.set_servo_angle(self.state.user_data.camera_controller.camera_deplacement.servo_horizontal.current_angle)
+        self.state.user_data.camera_controller.camera_deplacement.servo_vertical.set_servo_angle(self.state.user_data.camera_controller.camera_deplacement.servo_vertical.current_angle)
+
+        logger.info("Configuration mise à jour dynamiquement.")
+
+    def run(self) -> None:
+        # Enregistrer les gestionnaires de signaux
+        signal.signal(signal.SIGTERM, self.signal_handler)
+        signal.signal(signal.SIGINT, self.signal_handler)
+        logger.info("Gestionnaires de signaux enregistrés.")
+
+        # Thread pour déplacer la fenêtre vidéo (optionnel)
+        window_mover_thread = threading.Thread(target=self.move_window_thread, daemon=True)
+        window_mover_thread.start()
+        logger.info("Thread de déplacement de la fenêtre démarré.")
+
+        # Initialiser le déplacement de la caméra
+        camera_deplacement = CameraDeplacement(
+            p_horizontal=config.get("pid", {}).get("horizontal", {}).get("kp", 30.0),
+            i_horizontal=config.get("pid", {}).get("horizontal", {}).get("ki", 0.01),
+            d_horizontal=config.get("pid", {}).get("horizontal", {}).get("kd", 0.2),
+            p_vertical=config.get("pid", {}).get("vertical", {}).get("kp", 15.0),
+            i_vertical=config.get("pid", {}).get("vertical", {}).get("ki", 0.01),
+            d_vertical=config.get("pid", {}).get("vertical", {}).get("kd", 0.1),
+            dead_zone=DEAD_ZONE
+        )
+        camera_deplacement.position_zero()
+        logger.info("Déplacement de la caméra initialisé et positionné à zéro.")
+
+        # Initialiser le TrackSelector et le CameraController
+        self.state.user_data.track_selector = TrackSelector()
+        self.state.user_data.camera_controller = CameraController(camera_deplacement)
+        logger.info("TrackSelector et CameraController initialisés.")
+
+        # Récupérer le cairo_overlay pour dessiner
+        cairo_overlay = self.app.pipeline.get_by_name("cairo_overlay")
+        if cairo_overlay is None:
+            logger.error("Erreur : cairo_overlay non trouvé dans le pipeline.")
+            sys.exit(1)
+        cairo_overlay.connect("draw", draw_overlay, self.state.user_data)
+        logger.info("Cairo overlay connecté.")
+
+        # Démarrer le watcher de configuration
+        start_config_watcher("config.yaml", lambda: reload_config(self, "config.yaml"))
+
+        # Lancement de l'application GStreamer
+        try:
+            self.app.run()  # Démarrer le GLib.MainLoop
+        except Exception as e:
+            logger.exception(f"Exception rencontrée : {e}")
+        finally:
+            logger.info("Application fermée proprement.")
+            self.quit_app()
+
+# ========================================
+# ======= APPLICATION CALLBACK ========
+# ========================================
+def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data: UserAppCallback) -> Gst.PadProbeReturn:
+    """
+    Callback de l'application lorsqu'une nouvelle frame est disponible.
+    """
+    try:
+        buffer = info.get_buffer()
+        if buffer is None:
+            return Gst.PadProbeReturn.OK
+
+        user_data.increment()
+
+        # Récupération des dimensions
+        format, width, height = get_caps_from_pad(pad)
+        if width and height:
+            user_data.width = width
+            user_data.height = height
+
+        # Récupérer les détections
+        roi = hailo.get_roi_from_buffer(buffer)
+        detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
+        user_data.last_detections = detections
+
+        # Mise à jour des centres des bbox
+        calculate_bbox_centers(user_data, CONFIDENCE_THRESHOLD)
+
+        # Préparation des détections pour DeepSORT
+        detection_bboxes = [
+            [
+                d.get_bbox().xmin(),
+                d.get_bbox().ymin(),
+                d.get_bbox().xmax(),
+                d.get_bbox().ymax()
+            ]
+            for d in detections
+            if d.get_label() in TRACK_OBJECTS and d.get_confidence() >= CONFIDENCE_THRESHOLD
+        ]
+
+        # Mise à jour du tracker
+        user_data.tracker.update(detection_bboxes)
+
+        # Récupération des pistes actives
+        active_tracks = user_data.tracker.get_tracks()
+
+        # Mise à jour du sélecteur de piste
+        user_data.track_selector.update_tracks(active_tracks)
+
+        # Obtenir les informations de la piste sélectionnée
+        selected_center, time_since_update = user_data.track_selector.get_selected_track_info()
+        if selected_center:
+            user_data.camera_controller.update_info(selected_center, time_since_update)
+        else:
+            user_data.camera_controller.update_info(None, None)
+
+        return Gst.PadProbeReturn.OK
+    except Exception as e:
+        logger.exception(f"Erreur dans app_callback: {e}")
+        return Gst.PadProbeReturn.OK  # Continue pipeline même en cas d'erreur
+
+def calculate_bbox_centers(user_data: UserAppCallback, confidence_threshold: float = CONFIDENCE_THRESHOLD) -> None:
+    """
+    Calcule et stocke les centres normalisés des bounding boxes valides dans user_data.
     """
     user_data.bbox_centers = []
 
@@ -162,7 +794,7 @@ def calc_bbox_centers(user_data, confidence_threshold=CONFIDENCE_THRESHOLD):
 
     width = user_data.width
     height = user_data.height
-    if width is None or height is None:
+    if not width or not height:
         return
 
     for detection in detections:
@@ -176,35 +808,35 @@ def calc_bbox_centers(user_data, confidence_threshold=CONFIDENCE_THRESHOLD):
         center_x = 0.5 * (bbox.xmin() + bbox.xmax())
         center_y = 0.5 * (bbox.ymin() + bbox.ymax())
 
-        # Arrondi pour la liste d'affichage (pas forcément nécessaire)
+        # Normalisation des centres
         cx_norm = round(center_x, 4)
         cy_norm = round(center_y, 4)
         user_data.bbox_centers.append((cx_norm, cy_norm))
 
+    logger.debug(f"Calculated bbox centers: {user_data.bbox_centers}")
+
 # ====================================================
 # ======= AFFICHAGE DES POINTS DE CENTRE ET IDs ======
 # ====================================================
-def draw_overlay(cairooverlay, cr, timestamp, duration, user_data):
+def draw_overlay(cairo_overlay: Any, cr: cairo.Context, timestamp: int, duration: int, user_data: UserAppCallback) -> None:
     """
-    Affiche la zone morte (cercle) + le(s) barycentre(s) (point rouge) si dispo.
-    Ajoute aussi le point filtré du Kalman (vert) pour comparaison.
+    Affiche la zone morte et les centres des bounding boxes ainsi que les pistes suivies.
     """
     if user_data.width is None or user_data.height is None:
         return
 
-    width = user_data.width
-    height = user_data.height
-
-    # Dessin du cercle bleu (zone morte)
-    min_dimension = min(width, height)
-    radius = user_data.dead_zone * min_dimension
-    cr.set_source_rgb(0, 0, 1)  # Bleu
+    width: int = user_data.width
+    height: int = user_data.height
+    # Dessin de la zone morte
+    min_dimension: int = min(width, height)
+    radius: float = user_data.dead_zone * min_dimension
+    cr.set_source_rgb(*COLOR_BLUE)
     cr.arc(width / 2, height / 2, radius, 0, 2 * 3.14159)
     cr.stroke()
 
-    # Affichage de TOUS les barycentres bruts en rouge
-    cr.set_source_rgb(1, 0, 0)  # Rouge
-    for (center_x, center_y) in user_data.bbox_centers:
+    # Affichage des barycentres bruts
+    cr.set_source_rgb(*COLOR_RED)
+    for center_x, center_y in user_data.bbox_centers:
         bx = center_x * width
         by = center_y * height
         cr.arc(bx, by, 5, 0, 2 * 3.14159)
@@ -212,359 +844,29 @@ def draw_overlay(cairooverlay, cr, timestamp, duration, user_data):
 
     cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
     cr.set_font_size(14)
-    # === DEEPSORT TRACKER ===
-    # Dessin des tracks en vert
-    cr.set_source_rgb(0, 1, 0)  # Vert
+
+    # Dessin des pistes suivies
     for track in user_data.tracker.get_tracks():
         center_x, center_y = track.center
-        # print(f"[DISPLAY] Track ID={track.track_id}, center_x={round(center_x, 4)},center_y={round(center_y, 4)}")
         bx_f = center_x * width
         by_f = center_y * height
-        if track.time_since_update > 0:
-            cr.set_source_rgb(1, 1, 0)  # jaune pour les tracks inactifs
-        else:
-            cr.set_source_rgb(0, 1, 0)  # Vert pour actif
+        color = COLOR_GREEN if track.time_since_update == 0 else COLOR_YELLOW
+        cr.set_source_rgb(*color)
         cr.arc(bx_f, by_f, 4, 0, 2 * 3.14159)
         cr.fill()
 
-        # Draw track ID above the bounding box
+        # Dessiner l'ID de la piste
         track_id = str(track.track_id)
-        # print(f"Track ID {track_id} : {track.bbox}")
-        cr.move_to(bx_f + 10 , by_f + 10)  # Position text above the bounding box
+        cr.move_to(bx_f + 10, by_f + 10)
         cr.show_text(track_id)
 
-# =============================
-# ======= TRACK SELECTOR ======
-# =============================
-class TrackSelector:
-    """
-    Sélectionne quel track suivre en fonction des critères définis.
-    Par exemple, suit le track avec l'ID le plus ancien.
-    """
-    def __init__(self):
-        self.tracks = []
-        self.selected_track_id = None
-        self.lock = threading.Lock()
-
-    def update_tracks(self, tracks):
-        # print("[TrackSelector] update_tracks appelée avec les tracks:", [t.track_id for t in tracks])
-        with self.lock:
-            self.tracks = tracks
-            self.select_track()
-
-    def select_track(self):
-        """
-        Sélectionne le track à suivre. Ici, on choisit le track avec l'ID le plus bas (le plus ancien).
-        """
-        # print(f'tracks: {self.tracks}')
-        if not self.tracks:
-            self.selected_track_id = None
-            # print("[TrackSelector] Aucun track actif trouvé.")
-            return
-
-        # Trier les tracks par ID croissant (supposant que les IDs augmentent avec le temps)
-        sorted_tracks = sorted(self.tracks, key=lambda t: t.track_id)
-        self.selected_track_id = sorted_tracks[0].track_id
-        # print(f"[TrackSelector] Track actif sélectionné ID={self.selected_track_id}")
-
-    def get_selected_track_info(self):
-        """
-        Retourne le centre normalisé du track sélectionné.
-        """
-        with self.lock:
-            if self.selected_track_id is None:
-                # print("[TrackSelector] Aucun track sélectionné.")
-                return None, None
-
-            for track in self.tracks:
-                if track.track_id == self.selected_track_id:
-                    # print(f"[TrackSelector] Track sélectionné ID={track.track_id}, Center={track.center}, Time Since Update={track.time_since_update}")
-                    return track.center, track.time_since_update
-            # print("[TrackSelector] Track sélectionné non trouvé dans les tracks actuels.")
-            return None, None
-
-# ========================================
-# =========== PILOTAGE CAMERA ============
-# ========================================
-class PID:
-    def __init__(self, 
-                 kp=1.0, 
-                 ki=0.0, 
-                 kd=0.0, 
-                 setpoint=0.5, 
-                 output_limits=(-999, 999)
-                 ):
-        self.kp = kp
-        self.ki = ki
-        self.kd = kd
-        self.setpoint = setpoint
-        self.output_limits = output_limits
-        self._integral = 0.0
-        self._last_error = 0.0
-        self._last_time = time.time()
-
-    def reset(self):
-        self._integral = 0.0
-        self._last_error = 0.0
-        self._last_time = time.time()
-
-    def update(self, measurement):
-        now = time.time()
-        dt = now - self._last_time
-        if dt <= 0.0:
-            dt = 1e-16
-            
-        error = self.setpoint - measurement
-        p_out = self.kp * error
-        self._integral += error * dt
-        i_out = self.ki * self._integral
-        derivative = (error - self._last_error) / dt
-        d_out = self.kd * derivative
-        
-        output = p_out + i_out + d_out
-        min_out, max_out = self.output_limits
-        output = max(min_out, min(output, max_out))
-        
-        self._last_error = error
-        self._last_time = now
-
-        return output
-
-# ===================================
-# ======= CAMERA SERVOCONTROLLER ========
-# ===================================
-class ServoController:
-    def __init__(
-                self, 
-                channel=0, 
-                freq=50, 
-                i2c_address=0x40, 
-                servo_min_us=500, 
-                servo_max_us=2500, 
-                max_angle=180
-                ):
-        i2c = busio.I2C(board.SCL, board.SDA)
-        self.pca = PCA9685(i2c, address=i2c_address)
-        self.pca.frequency = freq
-
-        self.channel = channel
-        self.servo_min_us = servo_min_us
-        self.servo_max_us = servo_max_us
-        self.max_angle = max_angle
-
-        self.current_angle = max_angle / 2.0
-        self.set_servo_angle(self.current_angle)
-
-    def _us_to_duty_cycle(self, pulse_us):
-        period_us = 1_000_000 // self.pca.frequency  # ex: 20_000µs @ 50Hz
-        duty_cycle = int((pulse_us / period_us) * 65535)
-        return max(0, min(65535, duty_cycle))
-
-    def set_servo_angle(self, angle_deg):
-        angle_clamped = max(0, min(self.max_angle, angle_deg))
-        self.current_angle = angle_clamped
-
-        span_us = self.servo_max_us - self.servo_min_us
-        pulse_us = self.servo_min_us + (span_us * (angle_clamped / float(self.max_angle)))
-        self.pca.channels[self.channel].duty_cycle = self._us_to_duty_cycle(pulse_us)
-
-    def cleanup(self):
-        self.pca.channels[self.channel].duty_cycle = 0
-        self.pca.deinit()
-
-# ===================================
-# ======= CAMERA DEPLACEMENT ========
-# ===================================
-class CameraDeplacement:
-    """
-    Gère deux servos (horizontal + vertical) avec 2 PID.
-    """
-    def __init__(
-        self,
-        p_horizontal=1.0, i_horizontal=0.0, d_horizontal=0.0,
-        p_vertical=1.0, i_vertical=0.0, d_vertical=0.0,
-        dead_zone=0.05,
-        vertical_min_angle=45,
-        vertical_max_angle=135,
-        horizontal_min_angle=0,
-        horizontal_max_angle=270
-    ):
-        self.servo_horizontal = ServoController(channel=0, max_angle=270)
-        self.servo_vertical   = ServoController(channel=1, max_angle=180)
-
-        self.pid_x = PID(kp=p_horizontal, ki=i_horizontal, kd=d_horizontal,
-                         setpoint=0.5, output_limits=(-150, 150))
-        self.pid_y = PID(kp=p_vertical, ki=i_vertical, kd=d_vertical,
-                         setpoint=0.5, output_limits=(-50, 50))
-
-        self.dead_zone = dead_zone
-        self.horizontal_min_angle = horizontal_min_angle
-        self.horizontal_max_angle = horizontal_max_angle
-        self.vertical_min_angle = vertical_min_angle
-        self.vertical_max_angle = vertical_max_angle
-
-    def update_position(self, x_center, y_center):
-        """
-        Mise à jour des servos en fonction de x_center, y_center
-        (normalisés entre 0 et 1).
-        """
-        # Erreur sur X => angle horizontal
-        x_correction = self.pid_x.update(x_center)
-        new_horizontal_angle = self.servo_horizontal.current_angle + x_correction
-        new_horizontal_angle = max(self.horizontal_min_angle,
-                                   min(self.horizontal_max_angle, new_horizontal_angle))
-        # print(f"[CameraDeplacement] Nouvelle angle horizontal: {new_horizontal_angle}")
-        self.servo_horizontal.set_servo_angle(new_horizontal_angle)
-
-        # Erreur sur Y => angle vertical
-        y_correction = self.pid_y.update(y_center)
-        new_vertical_angle = self.servo_vertical.current_angle + y_correction
-        new_vertical_angle = max(self.vertical_min_angle,
-                                 min(self.vertical_max_angle, new_vertical_angle))
-        # print(f"[CameraDeplacement] Nouvelle angle vertical: {new_vertical_angle}")
-        self.servo_vertical.set_servo_angle(new_vertical_angle)
-
-    def position_zero(self):
-        """
-        Place la caméra à une position de référence.
-        """
-        self.servo_horizontal.set_servo_angle(135)  # Milieu pour servo 270°
-        self.servo_vertical.set_servo_angle(95)     # Milieu approximatif pour servo 180°
-        time.sleep(1)
-
-    def position_turn(self):
-        self.servo_horizontal.set_servo_angle(0)
-        self.servo_vertical.set_servo_angle(45)
-        time.sleep(1)
-        self.servo_horizontal.set_servo_angle(270)
-        self.servo_vertical.set_servo_angle(135)
-        time.sleep(1)
-        self.position_zero()
-
-    def cleanup_servo(self):
-        self.servo_horizontal.cleanup()
-        self.servo_vertical.cleanup()
-        self.pid_x.reset()
-        self.pid_y.reset()
-
-# ===================================
-# ======= CAMERA CONTROLLER ========
-# ===================================
-class CameraController:
-    """
-    Pilote la caméra en fonction des coordonnées fournies.
-    """
-    def __init__(self, camera_deplacement):
-        self.camera_deplacement = camera_deplacement
-        self.current_center = None
-        self.time_since_update = None  # Initialiser
-        self.lock = threading.Lock()
-        self.running = True
-        self.thread = threading.Thread(target=self.run, daemon=True)
-        self.thread.start()
-
-    def update_info(self, center, time_since_update):
-        with self.lock:
-            self.current_center = center
-            self.time_since_update = time_since_update
-
-    def run(self):
-        while self.running:
-            with self.lock:
-                center = self.current_center
-                time_since_update = self.time_since_update
-
-            if center is not None and time_since_update == 0:
-                # print(f"Camera moving to center: {center}")
-                x_center, y_center = center
-                # Vérifier si l'objet est en dehors de la zone morte
-                if (abs(x_center - 0.5) > self.camera_deplacement.dead_zone or
-                    abs(y_center - 0.5) > self.camera_deplacement.dead_zone):
-                    # print(f"[CameraController] Objet hors zone morte: x={x_center}, y={y_center}")
-                    self.camera_deplacement.update_position(x_center, y_center)
-                else:
-                    # print("Objet dans la zone morte, les servomoteurs restent en position.")
-                    self.camera_deplacement.update_position(0.5, 0.5)
-            else:
-                # print("Aucune piste active détectée ou track inactif. Les servomoteurs restent en position actuelle.")
-                # Définir le centre par défaut pour stabiliser les servomoteurs
-                self.camera_deplacement.update_position(0.5, 0.5)
-            
-            time.sleep(0.1)  # Ajuster la fréquence selon les besoins
-
-    def stop(self):
-        self.running = False
-        self.thread.join()
-
-# ===================================
-# ======= DEPLACEMENT WINDOWS APP ========
-# ===================================
-def move_window():
-    """
-    Déplace la fenêtre 'Hailo Detection App' en (440,62).
-    """
-    while True:
-        try:
-            window_ids = subprocess.check_output(
-                ['xdotool', 'search', '--name', 'Hailo Detection App']
-            ).decode().strip().split('\n')
-            if window_ids:
-                window_id = window_ids[0]
-                subprocess.run(['xdotool', 'windowmove', window_id, '440', '62'])
-                print(f"Fenêtre déplacée : ID {window_id} vers (440, 62)")
-                break
-            else:
-                print("Fenêtre 'Hailo Detection App' non trouvée, tentative suivante...")
-        except subprocess.CalledProcessError:
-            print("Erreur lors de la recherche de la fenêtre 'Hailo Detection App', tentative suivante...")
-        time.sleep(3)
-
+    logger.debug("Overlay drawn successfully.")
 
 # ========================================
 # =============== MAIN ===================
 # ========================================
 if __name__ == "__main__":
-    # Enregistrer les gestionnaires de signaux
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
-    # Thread pour déplacer la fenêtre vidéo (optionnel)
-    window_mover_thread = threading.Thread(target=move_window, daemon=True)
-    window_mover_thread.start()
-    
-    # Initialiser le déplacement de la caméra
-    camera_deplacement = CameraDeplacement(
-        p_horizontal=30.0,
-        i_horizontal=0.01,
-        d_horizontal=0.2,
-        p_vertical=15.0,
-        i_vertical=0.01,
-        d_vertical=0.1,
-        dead_zone=0.05
-    )
-    # camera_deplacement.position_turn()
-    camera_deplacement.position_zero()
-    
-    # Create an instance of the user app callback class
-    user_data = user_app_callback_class()
-    app = GStreamerDetectionApp(app_callback, user_data)
-    
-    # Initialiser le TrackSelector et le CameraController
-    user_data.track_selector = TrackSelector()
-    user_data.camera_controller = CameraController(camera_deplacement)
-    
-    # Récupérer le cairo_overlay pour dessiner
-    cairo_overlay = app.pipeline.get_by_name("cairo_overlay")
-    if cairo_overlay is None:
-        print("Erreur : cairo_overlay non trouvé dans le pipeline.")
-        exit(1)
-    cairo_overlay.connect("draw", draw_overlay, user_data)
+    detection_app = DetectionApp()
+    detection_app.run()
 
-    # Lancement de l'application GStreamer
-    try:
-        app.run()  # Démarrer le GLib.MainLoop
-    except Exception as e:
-        print(f"Exception rencontrée : {e}")
-    finally:
-        print("Application fermée proprement.")
-
-#Fin de detection.py
+# Fin de detection.py

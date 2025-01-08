@@ -1,0 +1,50 @@
+# config.yaml
+
+# Objets à suivre
+track_objects:
+  - person
+  - cat  # Ajoutez ou supprimez des objets ici
+
+# Seuil de confiance pour les détections
+confidence_threshold: 0.6
+
+# Zone morte de l'image (valeur entre 0 et 1)
+dead_zone: 0.05
+
+# Paramètres PID pour le contrôle horizontal et vertical
+pid:
+  horizontal:
+    kp: 30.0    # Coefficient proportionnel
+    ki: 0.01    # Coefficient intégral
+    kd: 0.2     # Coefficient dérivé
+  vertical:
+    kp: 15.0
+    ki: 0.01
+    kd: 0.1
+
+# Paramètres des servos
+servo:
+  channel_horizontal: 0
+  channel_vertical: 1
+  freq: 50
+  i2c_address: 0x40
+  servo_min_us: 500
+  servo_max_us: 2500
+  max_angle_horizontal: 270
+  max_angle_vertical: 180
+
+# Paramètres de déplacement de la caméra
+camera_movement:
+  enable: True
+  horizontal_min_angle: 0
+  horizontal_max_angle: 270
+  vertical_min_angle: 45
+  vertical_max_angle: 135
+
+# Paramètres pour déplacer la fenêtre de l'application
+window_mover:
+  window_name: "Hailo Detection App"  # Nom de la fenêtre à déplacer
+  move_x: 440                         # Position X
+  move_y: 62                          # Position Y
+  max_retries: 10                     # Nombre maximal de tentatives
+  delay: 3                            # Délai entre les tentatives (en secondes)
