@@ -298,7 +298,7 @@ class CameraDeplacement:
         self.servo_horizontal.set_servo_angle(self.horizontal_max_angle / 2)
         self.servo_vertical.set_servo_angle((self.vertical_min_angle + self.vertical_max_angle) / 2)
         time.sleep(1)
-        logger.info("Camera positioned to zero.")
+        # logger.info("Camera positioned to zero.")
 
     def position_turn(self) -> None:
         """
@@ -340,12 +340,17 @@ class CameraController:
         self.enable_movement: bool = CAMERA_MOVEMENT_ENABLE
         self.thread: threading.Thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
-        logger.info("CameraController thread started.")
+        self.movement = (0, 0)  # Position par défaut
+        # Attributs pour la gestion des logs significatifs
+        self.last_logged_movement: Optional[Tuple[float, float]] = None
+        self.movement_threshold: float = 0.03  # Seuil de mouvement significatif (ajustez selon vos besoins)
+        
+        # logger.info("CameraController thread started.")
 
     def set_enable_movement(self, enable: bool) -> None:
         with self.lock:
             self.enable_movement = enable
-            logger.info(f"CameraController movement enabled: {enable}")
+            # logger.info(f"CameraController movement enabled: {enable}")
             
     def update_info(self, center: Optional[Tuple[float, float]], time_since_update: Optional[int]) -> None:
         with self.lock:
@@ -359,7 +364,7 @@ class CameraController:
                 center = self.current_center
                 time_since_update = self.time_since_update
                 enable_movement = self.enable_movement  # Récupérer l'état d'activation
-                
+            
             if enable_movement:
                 if center is not None and time_since_update == 0:
                     x_center, y_center = center
@@ -367,6 +372,7 @@ class CameraController:
                     if (abs(x_center - 0.5) > self.camera_deplacement.dead_zone or
                             abs(y_center - 0.5) > self.camera_deplacement.dead_zone):
                         self.camera_deplacement.update_position(x_center, y_center)
+                        self.movement = (x_center, y_center)
                     else:
                         # Stabiliser les servomoteurs
                         self.camera_deplacement.update_position(0.5, 0.5)
@@ -376,9 +382,26 @@ class CameraController:
             else:
                 # Si les mouvements sont désactivés, maintenir la caméra en position zéro
                 self.camera_deplacement.update_position(0.5, 0.5)
-
+                
+            # Gestion des logs significatifs
+            if self.is_significant_movement(self.movement):
+                logger.info(f"Déplacement de la caméra -> Centre: {self.movement}")
+                self.last_logged_movement = self.movement
+                
             time.sleep(0.1)  # Ajuster la fréquence selon les besoins
 
+    def is_significant_movement(self, current_movement: Tuple[float, float]) -> bool:
+        """
+        Détermine si le déplacement actuel est significatif par rapport au dernier déplacement loggué.
+        """
+        if self.last_logged_movement is None:
+            return True  # Toujours loguer la première occurrence
+
+        delta_x = abs(current_movement[0] - self.last_logged_movement[0])
+        delta_y = abs(current_movement[1] - self.last_logged_movement[1])
+
+        return delta_x >= self.movement_threshold or delta_y >= self.movement_threshold
+    
     def stop(self) -> None:
         self.running = False
         self.thread.join()
@@ -431,7 +454,7 @@ def load_config(config_path: str = "config.yaml") -> dict:
 
         with open(absolute_config_path, 'r') as file:
             config = yaml.safe_load(file)
-            logger.info(f"Configuration chargée depuis {absolute_config_path}")
+            # logger.info(f"Configuration chargée depuis {absolute_config_path}")
             return config
     except FileNotFoundError:
         logger.error(f"Fichier de configuration {absolute_config_path} non trouvé.")
@@ -522,7 +545,12 @@ def reload_config(detection_app: 'DetectionApp', config_path: str = "config.yaml
     """
     global config, TRACK_OBJECTS, CONFIDENCE_THRESHOLD, DEAD_ZONE, CAMERA_MOVEMENT_ENABLE
     config = load_config(config_path)
-
+    
+    # Vérification que config est un dictionnaire
+    if not isinstance(config, dict):
+        logger.error("La configuration chargée n'est pas un dictionnaire valide.")
+        return
+    
     # Mettre à jour les variables globales
     TRACK_OBJECTS = config.get("track_objects", ["person", "cat"])
     CONFIDENCE_THRESHOLD = config.get("confidence_threshold", 0.5)
@@ -643,7 +671,7 @@ class DetectionApp:
         # Mettre à jour l'activation des mouvements de la caméra
         CAMERA_MOVEMENT_ENABLE = new_config.get("camera_movement", {}).get("enable", True)
         if self.state.user_data.camera_controller:
-            self.state.user_data.camera_controller.enable_movement = CAMERA_MOVEMENT_ENABLE
+            self.state.user_data.camera_controller.set_enable_movement = CAMERA_MOVEMENT_ENABLE
 
 
         # Mettre à jour les PID
@@ -678,7 +706,7 @@ class DetectionApp:
         signal.signal(signal.SIGINT, self.signal_handler)
         logger.info("Gestionnaires de signaux enregistrés.")
 
-        # Thread pour déplacer la fenêtre vidéo (optionnel)
+        # Thread pour déplacer la fenêtre vidéo
         window_mover_thread = threading.Thread(target=self.move_window_thread, daemon=True)
         window_mover_thread.start()
         logger.info("Thread de déplacement de la fenêtre démarré.")

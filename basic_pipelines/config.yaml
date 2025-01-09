@@ -16,7 +16,7 @@ pid:
   horizontal:
     kp: 30.0    # Coefficient proportionnel
     ki: 0.01    # Coefficient intégral
-    kd: 0.2     # Coefficient dérivé
+    kd: 0.2    # Coefficient dérivé
   vertical:
     kp: 15.0
     ki: 0.01
