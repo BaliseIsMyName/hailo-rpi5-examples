@@ -2,7 +2,7 @@
 
 from fastapi import FastAPI, Depends, HTTPException, status, Request, Response
 from fastapi.security import OAuth2PasswordRequestForm
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles  # Importer StaticFiles
 from sqlalchemy.orm import Session
@@ -10,11 +10,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from datetime import timedelta
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from starlette.requests import Request
 
 from . import models, schemas, crud, utils, database, oauth2
 from .config import ADMIN_PASSWORD, STREAM_URL  # Importer STREAM_URL
 
+# Configurer le limiteur
+limiter = Limiter(key_func=get_remote_address)
+
 app = FastAPI()
+
+app.state.limiter = limiter
+app.add_exception_handler(429, _rate_limit_exceeded_handler)
 
 # Monter le répertoire static pour les fichiers CSS, JS, etc.
 app.mount("/static", StaticFiles(directory="/home/raspi/hailo-rpi5-examples/basic_pipelines/app/static"), name="static")

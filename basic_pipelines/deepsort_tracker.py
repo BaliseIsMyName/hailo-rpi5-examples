@@ -10,7 +10,7 @@ class KalmanFilterBBOX:
     Filtre de Kalman pour suivre une boîte englobante complète : [x, y, vx, vy, width, height].
     """
 
-    def __init__(self, dt=1/25):
+    def __init__(self, dt=1/25, Q=None, R=None):
         self.dt = dt
 
         # État : [x, y, vx, vy, width, height] (6x1)
@@ -35,8 +35,14 @@ class KalmanFilterBBOX:
         ], dtype=np.float32)
 
         # Bruit du modèle et de la mesure
-        self.Q = np.eye(6, dtype=np.float32) * 1
-        self.R = np.eye(4, dtype=np.float32) * 5
+        if Q is not None:
+            self.Q = np.array(Q, dtype=np.float32)
+        else:
+            self.Q = np.eye(6, dtype=np.float32) * 1
+        if R is not None:
+            self.R = np.array(R, dtype=np.float32)
+        else:
+            self.R = np.eye(4, dtype=np.float32) * 5
 
         # Matrice de covariance (P)
         self.P = np.eye(6, dtype=np.float32)
@@ -54,6 +60,28 @@ class KalmanFilterBBOX:
         I = np.eye(self.P.shape[0], dtype=np.float32)
         self.P = np.dot((I - np.dot(K, self.H)), self.P)
 
+    def adapt_noise(self, speed):
+        """
+        Adapte dynamiquement les matrices de bruit en fonction de la vitesse.
+
+        :param speed: Vitesse actuelle de l'objet suivi.
+        """
+        self.Q = np.eye(6, dtype=np.float32) * (1 + speed)
+        self.R = np.eye(4, dtype=np.float32) * (5 / (1 + speed))
+    
+    def adapt_noise_based_on_size(self, width, height):
+        """
+        Adapte dynamiquement les matrices de bruit en fonction de la taille de la boîte.
+        
+        :param width: Largeur de la boîte englobante.
+        :param height: Hauteur de la boîte englobante.
+        """
+        size = (width + height) / 2
+        # Exemple : Plus la taille est grande, plus on diminue le bruit de mesure
+        self.R = np.eye(4, dtype=np.float32) * (5 / size)
+        # Optionnel : Adapter Q si nécessaire
+        self.Q = np.eye(6, dtype=np.float32) * (1 + 1/size)
+    
     def get_estimated_bbox(self):
         """
         Retourne la boîte englobante estimée (x, y, width, height).
@@ -61,25 +89,36 @@ class KalmanFilterBBOX:
         x, y, w, h = self.x[0, 0], self.x[1, 0], self.x[4, 0], self.x[5, 0]
         return x, y, w, h
 
-
     def set_initial_position(self, x, y):
         """
         Initialise la position directement (optionnel).
         """
         self.x[0] = x
         self.x[1] = y
+        
+    def update_QR(self, Q, R):
+        """
+        Met à jour les matrices de bruit du modèle et de la mesure.
+
+        :param Q: Nouvelle matrice de bruit du modèle (liste de listes ou array 6x6).
+        :param R: Nouvelle matrice de bruit de mesure (liste de listes ou array 4x4).
+        """
+        self.Q = np.array(Q, dtype=np.float32)
+        self.R = np.array(R, dtype=np.float32)
 
 class Track:
-    def __init__(self, track_id, detection, dt=1/25):
+    def __init__(self, track_id, detection, dt=1/25, Q=None, R=None):
         """
         Initialise une nouvelle piste avec une boîte englobante complète.
-        
+
         :param track_id: Identifiant unique de la piste.
         :param detection: Bounding box initiale [x1, y1, x2, y2].
         :param dt: Intervalle de temps entre les mises à jour.
+        :param Q: Matrice de bruit du modèle pour le filtre de Kalman.
+        :param R: Matrice de bruit de mesure pour le filtre de Kalman.
         """
         self.track_id = track_id
-        self.kalman_filter = KalmanFilterBBOX(dt=dt)
+        self.kalman_filter = KalmanFilterBBOX(dt=dt, Q=Q, R=R)
         
         # Initialiser l'état avec la détection (centre + dimensions)
         x1, y1, x2, y2 = detection
@@ -88,7 +127,7 @@ class Track:
         center_x = (x1 + x2) / 2
         center_y = (y1 + y2) / 2
                 
-        #initialisation de l'état du filtre
+        # Initialisation de l'état du filtre
         self.kalman_filter.x[0, 0] = center_x  # Position X
         self.kalman_filter.x[1, 0] = center_y  # Position Y
         self.kalman_filter.x[2, 0] = 0.0        # Vitesse X initialisée à 0
@@ -102,7 +141,6 @@ class Track:
         self.hit_streak = 1
         self.history = deque(maxlen=50)
         self.bbox = detection
-
 
     def predict(self):
         """
@@ -132,7 +170,18 @@ class Track:
         self.hits += 1
         self.hit_streak += 1
         self.time_since_update = 0
+    
+        # Adapter les matrices de bruit en fonction de la taille
+        # self.kalman_filter.adapt_noise_based_on_size(width, height)
+    
+        # # Calculer la vitesse actuelle
+        # vx = self.kalman_filter.x[2, 0]
+        # vy = self.kalman_filter.x[3, 0]
+        # speed = np.sqrt(vx**2 + vy**2)
 
+        # # Adapter les matrices de bruit en fonction de la vitesse
+        # self.kalman_filter.adapt_noise(speed)
+    
     @property
     def center(self):
         """
@@ -143,7 +192,7 @@ class Track:
         return x, y
 
 class DeepSORTTracker:
-    def __init__(self, max_age=30, min_hits=3, iou_threshold=0.3, dt=1/25):
+    def __init__(self, max_age=30, min_hits=3, iou_threshold=0.3, dt=1/25, Q=None, R=None):
         """
         Initialise le tracker DeepSORT.
 
@@ -151,6 +200,8 @@ class DeepSORTTracker:
         :param min_hits: Nombre minimal de mises à jour réussies avant d'afficher la piste.
         :param iou_threshold: Seuil IoU pour l'association des détections.
         :param dt: Intervalle de temps entre les mises à jour pour le filtre de Kalman.
+        :param Q: Matrice de bruit du modèle pour le filtre de Kalman.
+        :param R: Matrice de bruit de mesure pour le filtre de Kalman.
         """
         self.max_age = max_age
         self.min_hits = min_hits
@@ -158,6 +209,8 @@ class DeepSORTTracker:
         self.tracks = []
         self.next_id = 1
         self.dt = dt
+        self.Q = Q
+        self.R = R
 
     def iou(self, bbox1, bbox2):
         """
@@ -250,6 +303,38 @@ class DeepSORTTracker:
         Calculer la distance euclidienne entre deux centres.
         """
         return np.linalg.norm(np.array(center1) - np.array(center2))
+
+    def update_tracker_params(self, max_age=None, min_hits=None, iou_threshold=None, dt=None, Q=None, R=None):
+        """
+        Met à jour les paramètres du tracker et des filtres de Kalman.
+
+        :param max_age: Nouveau max_age.
+        :param min_hits: Nouveau min_hits.
+        :param iou_threshold: Nouveau iou_threshold.
+        :param dt: Nouveau intervalle de temps.
+        :param Q: Nouvelle matrice de bruit du modèle.
+        :param R: Nouvelle matrice de bruit de mesure.
+        """
+        if max_age is not None:
+            self.max_age = max_age
+        if min_hits is not None:
+            self.min_hits = min_hits
+        if iou_threshold is not None:
+            self.iou_threshold = iou_threshold
+        if dt is not None:
+            self.dt = dt
+            # Mettre à jour la matrice de transition F pour chaque track
+            for track in self.tracks:
+                track.kalman_filter.dt = dt
+                track.kalman_filter.F[0, 2] = dt
+                track.kalman_filter.F[1, 3] = dt
+
+        if Q is not None or R is not None:
+            for track in self.tracks:
+                if Q is not None:
+                    track.kalman_filter.Q = np.array(Q, dtype=np.float32)
+                if R is not None:
+                    track.kalman_filter.R = np.array(R, dtype=np.float32)
 
 
 def print_tracks(tracks):

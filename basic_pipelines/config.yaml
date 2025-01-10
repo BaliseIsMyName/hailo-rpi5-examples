@@ -11,16 +11,32 @@ confidence_threshold: 0.6
 # Zone morte de l'image (valeur entre 0 et 1)
 dead_zone: 0.05
 
-# Paramètres PID pour le contrôle horizontal et vertical
+# config.yaml
+
+# Seuil de taille pour déterminer si l'objet est grand ou petit
+size_threshold: 100  # Ajustez cette valeur en fonction de votre application
+
+# Paramètres PID pour le contrôle horizontal et vertical en fonction de la taille
 pid:
   horizontal:
-    kp: 30.0    # Coefficient proportionnel
-    ki: 0.01    # Coefficient intégral
-    kd: 0.2    # Coefficient dérivé
+    large_object:
+      kp: 30.0
+      ki: 0.02
+      kd: 5
+    small_object:
+      kp: 30.0
+      ki: 0.02
+      kd: 5
   vertical:
-    kp: 15.0
-    ki: 0.01
-    kd: 0.1
+    large_object:
+      kp: 15.0
+      ki: 0.02
+      kd: 0.2
+    small_object:
+      kp: 15.0
+      ki: 0.01
+      kd: 0.1
+
 
 # Paramètres des servos
 servo:
@@ -35,7 +51,7 @@ servo:
 
 # Paramètres de déplacement de la caméra
 camera_movement:
-  enable: True
+  enable: False
   horizontal_min_angle: 0
   horizontal_max_angle: 270
   vertical_min_angle: 45
@@ -48,3 +64,23 @@ window_mover:
   move_y: 62                          # Position Y
   max_retries: 10                     # Nombre maximal de tentatives
   delay: 3                            # Délai entre les tentatives (en secondes)
+
+# === Nouveaux paramètres de suivi ===
+tracking:
+  max_age: 30                        # Nombre maximal de frames sans mise à jour avant suppression de la piste
+  min_hits: 3                        # Nombre minimal de mises à jour réussies avant d'afficher la piste
+  iou_threshold: 0.3                 # Seuil IoU pour l'association des détections
+  dt: 0.04                           # Intervalle de temps entre les mises à jour pour le filtre de Kalman
+  kalman_filter:
+    Q:                                # Bruit du modèle (matrice Q)
+      - [1, 0, 0, 0, 0, 0]
+      - [0, 1, 0, 0, 0, 0]
+      - [0, 0, 1, 0, 0, 0]
+      - [0, 0, 0, 1, 0, 0]
+      - [0, 0, 0, 0, 1, 0]
+      - [0, 0, 0, 0, 0, 1]
+    R:                                # Bruit de la mesure (matrice R)
+      - [5, 0, 0, 0]
+      - [0, 5, 0, 0]
+      - [0, 0, 5, 0]
+      - [0, 0, 0, 5]
