@@ -13,8 +13,53 @@ body {
 
 h1,
 h2 {
+      /* display: flex; */
+      /* border: 2px black solid; */
       font-size: 3em;
       margin-bottom: 20px;
+}
+
+.container.stream-page h2 {
+      /* display: inline-flex; */
+      /* position: absolute; */
+      /* transform: translateX(50%); */
+
+      padding: 2px 5px 2px 5px;
+      /* box-sizing: content-box; */
+      color: #ffffff;
+      font-size: 1em;
+      
+      border-radius: 5px;
+      background-color: #e74c3c;
+      position: absolute;
+      top: 0px;
+      left: 10px;
+      padding: 5px 10px;
+      border-radius: 4px;
+      z-index: 1;
+}
+.container.stream-page {
+      position: relative;
+      
+      width: 100%;
+      height: auto;
+            /* ou width: 100%; etc. selon ton besoin */
+      margin: 0 auto;
+      margin-top: 50px;
+            /* centrer éventuellement */
+}
+/* video {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      /* ou contain, selon si tu veux rogner ou pas */
+/* } */ 
+
+.index-page .button {
+      font-size: 3em;
+      margin: 0;
+      padding: 2px 5px 2px 5px;
 }
 
 .button {
@@ -97,7 +142,7 @@ body.stream-page video {
 
 /* Styles pour le lien du nom de l'utilisateur dans le navbar */
 .navbar-user {
-      color: #fff;
+      color: #82d094;
       /* Couleur du texte */
       text-decoration: none;
       /* Pas de soulignement */
@@ -116,6 +161,11 @@ body.stream-page video {
       /* Changement de couleur au survol */
 }
 
+.container a.button {
+      color: #fff;
+      background-color: #e74c3c;
+      border-radius: 8px;
+}
 /* Styles spécifiques aux formulaires */
 .form-container {
       display: flex;
@@ -271,4 +321,170 @@ video {
 
 .input-error {
       border-color: #e74c3c;
+}
+
+/* ========================================================= */
+/*    AJOUTS POUR LES APPAREILS TACTILES (smartphones, etc.) */
+/*    pointer: coarse + hover: none                          */
+/* ========================================================= */
+@media (pointer: coarse) and (hover: none) {
+
+      /* ------------------------------------------------------ */
+      /* 1) NAVBAR (menu en haut) : plus de hauteur et polices  */
+      /* ------------------------------------------------------ */
+      .navbar {
+            padding: 40px;
+            /* Au lieu de 10px */
+      }
+
+      .navbar a.navbar-brand {
+            font-size: 3em;
+            /* Plus grand que 1.5em */
+      }
+
+      .navbar-user {
+            font-size: 3em;
+            /* Plus grand que 1.5em */
+      }
+
+      .navbar-button {
+            font-size: 3em;
+            /* Plus grand que 1.2em */
+            padding: 12px 20px;
+            /* Boutons plus 'hauts' */
+      }
+
+      /* ------------------------------------------------------ */
+      /* 2) BOUTONS GÉNÉRAUX : plus gros, faciles à cliquer     */
+      /* ------------------------------------------------------ */
+      /* .button {
+            font-size: 2em;
+            /* Au lieu de 1.2em */
+            /* padding: 18px 25px; */
+       /* }   */
+
+      /* ----------------------------------------------------------------- */
+      /* 3) CONTENEUR GÉNÉRAL (.container) : moins de marge sur mobile     */
+      /* ----------------------------------------------------------------- */
+      .container {
+            margin: 20px 10px;
+            /* Peu de marge latérale */
+            padding: 0;
+            font-size: 2em;
+            /* Si tu veux supprimer ou réduire le padding */
+      }
+
+      .container.stream-page h2 {
+            /* display: inline-flex; */
+            /* position: absolute; */
+            /* transform: translateX(50%); */
+
+            padding: 2px 5px 2px 5px;
+            /* box-sizing: content-box; */
+            color: #ffffff;
+            font-size: 0.5em;
+
+            border-radius: 5px;
+            background-color: #e74c3c;
+            position: absolute;
+            top: 0px;
+            left: 10px;
+            padding: 5px 10px;
+            border-radius: 4px;
+            z-index: 1;
+      }
+
+      .container a.button {
+            font-size: 2.5em;
+            border-radius: 20px;
+      }
+
+      /* ----------------------------------------------------------------- */
+      /* 4) FORM-CONTAINER (login/register) : quasi pas de marge           */
+      /* ----------------------------------------------------------------- */
+      .form-container {
+            width: auto;
+            /* Au lieu de 400px */
+            margin: 20px 10px;
+            /* Très peu de marge latérale */
+            padding: 20px;
+            /* Peut être ajusté si trop serré */
+      }
+
+      .form-container label, p {
+            font-size: 2em;
+      }
+
+      .form-container a.button{
+            font-size: 1.5em;
+            margin-right: 5px;
+      }
+
+      .form-container button.button {
+            font-size: 2.5em;
+            margin-right: 5px;
+      }
+
+      .form-container h2 {
+            margin-right: 20px;
+      }
+
+      .form-container input[type="text"],
+      .form-container input[type="email"],
+      .form-container input[type="password"] {
+            font-size: 2em;
+            padding: 5px 0px;
+      }
+
+      .form-container .password-icon svg {
+            transform: scale(2);
+            padding-right: 20px;
+      }
+
+      /* ----------------------------------------------------------------- */
+      /* 5) PAGE DE PROFIL : agrandir un peu le texte                      */
+      /* ----------------------------------------------------------------- */
+      #profile-info p {
+            font-size: 2em;
+            margin-bottom: 15px;
+            /* un peu plus d'espacement */
+      }
+
+      /* ----------------------------------------------------------------- */
+      /* 6) PAGE DE STREAM : quasi pas de marges                           */
+      /* ----------------------------------------------------------------- */
+      body.stream-page {
+            margin: 0;
+            padding: 0;
+            height: auto;
+            /* On enlève éventuellement le 100vh si on veut coller en haut */
+      }
+
+
+      /* Optionnel : pour que la vidéo prenne plus de place en largeur */
+      body.stream-page video {
+            display: block;
+            /* Pour supprimer les éventuels espaces inline */
+            width: 100% !important;
+            max-width: none !important;
+            /* S’adapte à la largeur du parent */
+            height: auto;
+            border: none;
+            /* si tu veux une bordure */
+      }
+      html,
+      body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+      }
+
+      video {
+            display: block;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            /* ou contain, selon si tu veux rogner ou pas */
+      }
 }
