@@ -361,9 +361,9 @@ class CameraDeplacement:
             self.pid_y.ki = self.pid_config['vertical']['small_object']['ki']
             self.pid_y.kd = self.pid_config['vertical']['small_object']['kd']
 
-        # Réinitialiser les PID pour éviter les accumulations indésirables
-        self.pid_x.reset()
-        self.pid_y.reset()
+        # # Réinitialiser les PID pour éviter les accumulations indésirables
+        # self.pid_x.reset()
+        # self.pid_y.reset()
 
     def update_position(self, x_center: float, y_center: float, size: float) -> None:
         """
@@ -496,14 +496,14 @@ class CameraController:
                         self.movement = (x_center, y_center)
                     else:
                         # Réinitialiser les PID si la position est déjà correcte
-                        self.camera_deplacement.pid_x.reset()
-                        self.camera_deplacement.pid_y.reset()
+                        # self.camera_deplacement.pid_x.reset()
+                        # self.camera_deplacement.pid_y.reset()
                         # Stabiliser les servomoteurs avec une taille par défaut
                         self.camera_deplacement.update_position(0.5, 0.5, self.camera_deplacement.size_threshold)
                 else:
                     # Stabiliser les servomoteurs avec une taille par défaut
-                    self.camera_deplacement.pid_x.reset()
-                    self.camera_deplacement.pid_y.reset()
+                    # self.camera_deplacement.pid_x.reset()
+                    # self.camera_deplacement.pid_y.reset()
                     self.camera_deplacement.update_position(0.5, 0.5, self.camera_deplacement.size_threshold)
             else:
                 # Si les mouvements sont désactivés, maintenir la caméra en position zéro
@@ -514,7 +514,7 @@ class CameraController:
                 logger.info(f"Déplacement de la caméra -> Centre: {self.movement}")
                 self.last_logged_movement = self.movement
                 
-            time.sleep(0.02)  # Ajuster la fréquence selon les besoins
+            time.sleep(0.01)  # Ajuster la fréquence selon les besoins
 
     def is_significant_movement(self, current_movement: Tuple[float, float]) -> bool:
         """

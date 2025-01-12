@@ -20,22 +20,22 @@ size_threshold: 100  # Ajustez cette valeur en fonction de votre application
 pid:
   horizontal:
     large_object:
-      kp: 30.0
-      ki: 0.02
-      kd: 5
+      kp: 7.0
+      ki: 0.01
+      kd: 1
     small_object:
-      kp: 30.0
-      ki: 0.02
-      kd: 5
+      kp: 7.0
+      ki: 0.01
+      kd: 1
   vertical:
     large_object:
-      kp: 15.0
-      ki: 0.02
-      kd: 0.2
-    small_object:
-      kp: 15.0
+      kp: 7.0
       ki: 0.01
-      kd: 0.1
+      kd: 1
+    small_object:
+      kp: 7.0
+      ki: 0.01
+      kd: 1
 
 
 # Paramètres des servos
@@ -73,14 +73,14 @@ tracking:
   dt: 0.04                           # Intervalle de temps entre les mises à jour pour le filtre de Kalman
   kalman_filter:
     Q:                                # Bruit du modèle (matrice Q)
-      - [1, 0, 0, 0, 0, 0]
-      - [0, 1, 0, 0, 0, 0]
-      - [0, 0, 1, 0, 0, 0]
-      - [0, 0, 0, 1, 0, 0]
-      - [0, 0, 0, 0, 1, 0]
-      - [0, 0, 0, 0, 0, 1]
+      - [1, 0, 0, 0, 0, 0]        # incertirtude sur la position horizontale
+      - [0, 1, 0, 0, 0, 0]        # incertirtude sur la position verticale  
+      - [0, 0, 1, 0, 0, 0]        # incertirtude sur la vitesse horizontale 
+      - [0, 0, 0, 1, 0, 0]        # incertirtude sur la vitesse verticale
+      - [0, 0, 0, 0, 1, 0]        # incertirtude sur la largeur de l'objet
+      - [0, 0, 0, 0, 0, 1]        # incertirtude sur la hauteur de l'objet
     R:                                # Bruit de la mesure (matrice R)
-      - [5, 0, 0, 0]
-      - [0, 5, 0, 0]
-      - [0, 0, 5, 0]
-      - [0, 0, 0, 5]
+      - [1, 0, 0, 0]            # variance de la mesure de la position horizontale
+      - [0, 1, 0, 0]            # variance de la mesure de la position verticale
+      - [0, 0, 1, 0]            # variance de la mesure de la largeur de l'objet
+      - [0, 0, 0, 1]            # variance de la mesure de la hauteur de l'objet
