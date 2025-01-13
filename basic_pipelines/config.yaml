@@ -9,34 +9,25 @@ track_objects:
 confidence_threshold: 0.6
 
 # Zone morte de l'image (valeur entre 0 et 1)
-dead_zone: 0.05
+dead_zone: 0.03
 
-# config.yaml
-
-# Seuil de taille pour déterminer si l'objet est grand ou petit
-size_threshold: 100  # Ajustez cette valeur en fonction de votre application
-
-# Paramètres PID pour le contrôle horizontal et vertical en fonction de la taille
+# Paramètres PID pour le contrôle horizontal et vertical des servos
 pid:
   horizontal:
-    large_object:
-      kp: 7.0
-      ki: 0.01
-      kd: 1
-    small_object:
-      kp: 7.0
-      ki: 0.01
-      kd: 1
+    kp: 40
+    ki: 0.5
+    kd: 4
   vertical:
-    large_object:
-      kp: 7.0
-      ki: 0.01
-      kd: 1
-    small_object:
-      kp: 7.0
-      ki: 0.01
-      kd: 1
+    kp: 40
+    ki: 0.5
+    kd: 4
 
+# Paramètres du fader PID
+fader:
+  enable: true          # Active/désactive la logique de fader
+  max_distance: 0.5     # Au-delà de 0.5 (distance normalisée), on applique max_factor
+  min_factor: 0.1       # Facteur minimum (proche du centre)
+  max_factor: 1       # Facteur maximum (loin du centre)
 
 # Paramètres des servos
 servo:
@@ -69,7 +60,7 @@ window_mover:
 tracking:
   max_age: 30                        # Nombre maximal de frames sans mise à jour avant suppression de la piste
   min_hits: 3                        # Nombre minimal de mises à jour réussies avant d'afficher la piste
-  iou_threshold: 0.3                 # Seuil IoU pour l'association des détections
+  iou_threshold: 0.2                 # Seuil IoU pour l'association des détections
   dt: 0.04                           # Intervalle de temps entre les mises à jour pour le filtre de Kalman
   kalman_filter:
     Q:                                # Bruit du modèle (matrice Q)

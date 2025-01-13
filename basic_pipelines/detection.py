@@ -64,6 +64,32 @@ class DetectionAppState:
     should_exit: bool = False
     user_data: Any = field(default=None)
 
+# ========================================
+# =========== USER APP CALLBACK ==========
+# ========================================
+@dataclass
+class UserAppCallback(app_callback_class):
+    """
+    Classe de rappel utilisateur pour gérer les détections et le suivi.
+    """
+    detection_app: Optional['DetectionApp'] = None  # Référence à DetectionApp
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_detections: List[hailo.HAILO_DETECTION] = []
+        self.width: Optional[int] = None
+        self.height: Optional[int] = None
+        self.bbox_centers: List[Tuple[float, float]] = []
+        self.tracker: DeepSORTTracker = DeepSORTTracker()
+        self.track_selector: TrackSelector = TrackSelector()
+        self.camera_controller: Optional[CameraController] = None  # Initialisé dans le main
+        self.current_fps: float = 0.0
+        self.current_droprate: float = 0.0
+        self.avg_fps: float = 0.0
+        self.detection_event: threading.Event = threading.Event()
+        self.lock: threading.Lock = threading.Lock()
+        self.dead_zone: float = DEAD_ZONE
+        
 # =============================
 # ======= TRACK SELECTOR ======
 # =============================
@@ -290,8 +316,9 @@ class CameraDeplacement:
         pid_config: dict,
         servo_config: dict,
         camera_movement_config: dict,
-        dead_zone: float = 0.05
+        fader_config: dict = None
     ) -> None:
+        
         # Initialisation des servos
         self.servo_horizontal: ServoController = ServoController(
             channel=servo_config.get("channel_horizontal", 0),
@@ -312,96 +339,85 @@ class CameraDeplacement:
 
         # Stockage des paramètres PID pour objets grands et petits
         self.pid_config = pid_config
-        self.size_threshold = camera_movement_config.get("size_threshold", 100)
 
-        # Initialisation des contrôleurs PID avec les paramètres pour petits objets
+        # Initialisation des contrôleurs PID
         self.pid_x: PID = PID(
-            kp=pid_config['horizontal']['small_object']['kp'],
-            ki=pid_config['horizontal']['small_object']['ki'],
-            kd=pid_config['horizontal']['small_object']['kd'],
+            kp=pid_config['horizontal']['kp'],
+            ki=pid_config['horizontal']['ki'],
+            kd=pid_config['horizontal']['kd'],
             setpoint=0.5,
             output_limits=(-150, 150)
         )
         self.pid_y: PID = PID(
-            kp=pid_config['vertical']['small_object']['kp'],
-            ki=pid_config['vertical']['small_object']['ki'],
-            kd=pid_config['vertical']['small_object']['kd'],
+            kp=pid_config['vertical']['kp'],
+            ki=pid_config['vertical']['ki'],
+            kd=pid_config['vertical']['kd'],
             setpoint=0.5,
             output_limits=(-50, 50)
         )
 
-        self.dead_zone: float = dead_zone
+        # self.dead_zone: float = dead_zone
         self.horizontal_min_angle: int = camera_movement_config.get("horizontal_min_angle", 0)
         self.horizontal_max_angle: int = camera_movement_config.get("horizontal_max_angle", 270)
         self.vertical_min_angle: int = camera_movement_config.get("vertical_min_angle", 45)
         self.vertical_max_angle: int = camera_movement_config.get("vertical_max_angle", 135)
+        
+        self.fader_config = fader_config or {}
+        # On peut stocker les sous-champs pour éviter de parser à chaque fois
+        self.fader_enable = self.fader_config.get("enable", False)
+        self.fader_max_distance = float(self.fader_config.get("max_distance", 0.5))
+        self.fader_min_factor = float(self.fader_config.get("min_factor", 0.2))
+        self.fader_max_factor = float(self.fader_config.get("max_factor", 1.0))
 
-    def update_pid_parameters(self, size: float) -> None:
-        """
-        Met à jour les paramètres PID en fonction de la taille de l'objet.
 
-        :param size: Taille moyenne de la boîte englobante.
-        """
-        if size >= self.size_threshold:
-            # Objet grand (proche)
-            self.pid_x.kp = self.pid_config['horizontal']['large_object']['kp']
-            self.pid_x.ki = self.pid_config['horizontal']['large_object']['ki']
-            self.pid_x.kd = self.pid_config['horizontal']['large_object']['kd']
-
-            self.pid_y.kp = self.pid_config['vertical']['large_object']['kp']
-            self.pid_y.ki = self.pid_config['vertical']['large_object']['ki']
-            self.pid_y.kd = self.pid_config['vertical']['large_object']['kd']
-        else:
-            # Objet petit (éloigné)
-            self.pid_x.kp = self.pid_config['horizontal']['small_object']['kp']
-            self.pid_x.ki = self.pid_config['horizontal']['small_object']['ki']
-            self.pid_x.kd = self.pid_config['horizontal']['small_object']['kd']
-
-            self.pid_y.kp = self.pid_config['vertical']['small_object']['kp']
-            self.pid_y.ki = self.pid_config['vertical']['small_object']['ki']
-            self.pid_y.kd = self.pid_config['vertical']['small_object']['kd']
-
-        # # Réinitialiser les PID pour éviter les accumulations indésirables
-        # self.pid_x.reset()
-        # self.pid_y.reset()
-
-    def update_position(self, x_center: float, y_center: float, size: float) -> None:
-        """
-        Mise à jour des servos en fonction de x_center et y_center (normalisés entre 0 et 1),
-        en tenant compte de la taille de l'objet.
-
-        :param x_center: Centre X normalisé.
-        :param y_center: Centre Y normalisé.
-        :param size: Taille moyenne de la boîte englobante.
-        """
-        # Mettre à jour les paramètres PID en fonction de la taille
-        self.update_pid_parameters(size)
-
-        # Correction pour l'axe X
+    def update_position(self, x_center: float, y_center: float) -> None:
+        # 1) Calcul standard du PID
         x_correction: float = self.pid_x.update(x_center)
-        # Appliquer une limite de correction
-        x_correction = max(-2.0, min(2.0, x_correction))
+        y_correction: float = self.pid_y.update(y_center)
 
-        new_horizontal_angle: float = self.servo_horizontal.current_angle + x_correction
+        # 2) Appliquer une limite de correction (existant)
+        x_correction = max(-2.0, min(2.0, x_correction))
+        y_correction = max(-2.0, min(2.0, y_correction))
+
+        # 3) Fader (si enable == True)
+        if self.fader_enable:
+            # distance du centre
+            dx = x_center - 0.5
+            dy = y_center - 0.5
+            distance = (dx*dx + dy*dy)**0.5  # sqrt(dx^2 + dy^2)
+            
+            # ratio dans [0,1]
+            ratio = distance / self.fader_max_distance
+            ratio = max(0.0, min(1.0, ratio))
+            
+            # interpolation
+            # ex. fader = min_factor + ratio * (max_factor - min_factor)
+            fader_value = self.fader_min_factor + ratio*(self.fader_max_factor - self.fader_min_factor)
+
+            # appliquer le fader
+            x_correction *= fader_value
+            y_correction *= fader_value
+
+            logger.debug(
+                f"[Fader] distance={distance:.3f} ratio={ratio:.3f} "
+                f"fader={fader_value:.3f} => x_corr={x_correction:.3f}, y_corr={y_correction:.3f}"
+            )
+
+        # 4) Calculer l'angle final
+        new_horizontal_angle = self.servo_horizontal.current_angle + x_correction
         new_horizontal_angle = max(
             self.horizontal_min_angle,
             min(self.horizontal_max_angle, new_horizontal_angle)
         )
         self.servo_horizontal.set_servo_angle(new_horizontal_angle)
 
-        # Correction pour l'axe Y
-        y_correction: float = self.pid_y.update(y_center)
-        # Appliquer une limite de correction
-        y_correction = max(-3.0, min(3.0, y_correction))
-
-        new_vertical_angle: float = self.servo_vertical.current_angle + y_correction
+        new_vertical_angle = self.servo_vertical.current_angle + y_correction
         new_vertical_angle = max(
             self.vertical_min_angle,
             min(self.vertical_max_angle, new_vertical_angle)
         )
         self.servo_vertical.set_servo_angle(new_vertical_angle)
 
-        # Log détaillé des corrections PID et des nouveaux angles
         logger.debug(
             f"Camera Position Updated -> "
             f"X Correction: {x_correction:.4f}, "
@@ -449,8 +465,11 @@ class CameraController:
     """
     Pilote la caméra en fonction des coordonnées fournies.
     """
-
-    def __init__(self, camera_deplacement: CameraDeplacement) -> None:
+    def __init__(
+        self, 
+        camera_deplacement: CameraDeplacement, 
+        user_data: UserAppCallback
+        ) -> None:
         self.camera_deplacement: CameraDeplacement = camera_deplacement
         self.current_center: Optional[Tuple[float, float]] = None
         self.time_since_update: Optional[int] = None
@@ -462,14 +481,13 @@ class CameraController:
         # Attributs pour la gestion des logs significatifs
         self.last_logged_movement: Optional[Tuple[float, float]] = None
         self.movement_threshold: float = 0.03  # Seuil de mouvement significatif (ajustez selon vos besoins)
-        
+        self.user_data: UserAppCallback = user_data
         self.thread: threading.Thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
     def set_enable_movement(self, enable: bool) -> None:
         with self.lock:
             self.enable_movement = enable
-            logger.info(f"CameraController movement enabled: {enable}")
             
     def update_info(self, center: Optional[Tuple[float, float]], time_since_update: Optional[int]) -> None:
         with self.lock:
@@ -483,31 +501,23 @@ class CameraController:
                 center = self.current_center
                 time_since_update = self.time_since_update
                 enable_movement = self.enable_movement  # Récupérer l'état d'activation
+                dead_zone: float = self.user_data.dead_zone
             
             if enable_movement:
                 if center is not None and time_since_update == 0:
                     x_center, y_center = center
                     # Vérifier si l'objet est en dehors de la zone morte
-                    if (abs(x_center - 0.5) > self.camera_deplacement.dead_zone or
-                            abs(y_center - 0.5) > self.camera_deplacement.dead_zone):
-                        # Calcul de la taille moyenne de la boîte englobante
-                        size = self.calculate_size(x_center, y_center)
-                        self.camera_deplacement.update_position(x_center, y_center, size)
+                    if (abs(x_center - 0.5) > dead_zone or
+                            abs(y_center - 0.5) > dead_zone):
+                        self.camera_deplacement.update_position(x_center, y_center)
                         self.movement = (x_center, y_center)
                     else:
-                        # Réinitialiser les PID si la position est déjà correcte
-                        # self.camera_deplacement.pid_x.reset()
-                        # self.camera_deplacement.pid_y.reset()
-                        # Stabiliser les servomoteurs avec une taille par défaut
-                        self.camera_deplacement.update_position(0.5, 0.5, self.camera_deplacement.size_threshold)
+                        self.camera_deplacement.update_position(0.5, 0.5)
                 else:
-                    # Stabiliser les servomoteurs avec une taille par défaut
-                    # self.camera_deplacement.pid_x.reset()
-                    # self.camera_deplacement.pid_y.reset()
-                    self.camera_deplacement.update_position(0.5, 0.5, self.camera_deplacement.size_threshold)
+                    self.camera_deplacement.update_position(0.5, 0.5)
             else:
-                # Si les mouvements sont désactivés, maintenir la caméra en position zéro
-                self.camera_deplacement.update_position(0.5, 0.5, self.camera_deplacement.size_threshold)
+                
+                self.camera_deplacement.update_position(0.5, 0.5)
                 
             # Gestion des logs significatifs
             if self.is_significant_movement(self.movement):
@@ -528,49 +538,11 @@ class CameraController:
 
         return delta_x >= self.movement_threshold or delta_y >= self.movement_threshold
 
-    def calculate_size(self, x_center: float, y_center: float) -> float:
-        """
-        Calcule la taille moyenne de la boîte englobante.
-        Cette méthode doit être adaptée en fonction de la manière dont vous calculez la taille.
-
-        :param x_center: Centre X normalisé.
-        :param y_center: Centre Y normalisé.
-        :return: Taille moyenne calculée.
-        """
-        # Exemple simple : inverser la normalisation pour estimer la taille
-        # Vous devez adapter cette méthode selon vos besoins spécifiques
-        return self.camera_deplacement.size_threshold  # Placeholder
-
     def stop(self) -> None:
         self.running = False
         self.thread.join()
         logger.info("CameraController thread stopped.")
 
-# ========================================
-# =========== USER APP CALLBACK ==========
-# ========================================
-@dataclass
-class UserAppCallback(app_callback_class):
-    """
-    Classe de rappel utilisateur pour gérer les détections et le suivi.
-    """
-    detection_app: Optional['DetectionApp'] = None  # Référence à DetectionApp
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.last_detections: List[hailo.HAILO_DETECTION] = []
-        self.width: Optional[int] = None
-        self.height: Optional[int] = None
-        self.bbox_centers: List[Tuple[float, float]] = []
-        self.tracker: DeepSORTTracker = DeepSORTTracker()
-        self.track_selector: TrackSelector = TrackSelector()
-        self.camera_controller: Optional[CameraController] = None  # Initialisé dans le main
-        self.current_fps: float = 0.0
-        self.current_droprate: float = 0.0
-        self.avg_fps: float = 0.0
-        self.detection_event: threading.Event = threading.Event()
-        self.lock: threading.Lock = threading.Lock()
-        self.dead_zone: float = DEAD_ZONE
 
 # =============================
 # ======= CONFIGURATION ========
@@ -615,6 +587,7 @@ DEAD_ZONE: float = config.get("dead_zone", 0.05)
 # PID Parameters
 PID_HORIZONTAL = config.get("pid", {}).get("horizontal", {})
 PID_VERTICAL = config.get("pid", {}).get("vertical", {})
+FADER_CONFIG = config.get("fader", {})
 
 # Servo Parameters
 SERVO_CONFIG = config.get("servo", {})
@@ -687,61 +660,225 @@ def start_config_watcher(config_path: str, reload_callback) -> None:
 def reload_config(detection_app: 'DetectionApp', config_path: str = "config.yaml") -> None:
     """
     Recharge la configuration et met à jour les paramètres de l'application.
-
+    Si une valeur dans le fichier config.yaml est invalide, on garde l'ancienne valeur ou une valeur par défaut,
+    et on loggue l'information. Si elle est valide, on l'applique et on loggue le changement.
+    
     Args:
         detection_app (DetectionApp): Instance de l'application de détection.
         config_path (str): Chemin vers le fichier de configuration.
     """
-    global config, TRACK_OBJECTS, CONFIDENCE_THRESHOLD, DEAD_ZONE, CAMERA_MOVEMENT_ENABLE, SIZE_THRESHOLD
-    config = load_config(config_path)
-    
-    # Vérification que config est un dictionnaire
-    if not isinstance(config, dict):
-        logger.error("La configuration chargée n'est pas un dictionnaire valide.")
+    global config, TRACK_OBJECTS, CONFIDENCE_THRESHOLD, DEAD_ZONE, CAMERA_MOVEMENT_ENABLE
+
+    # Sauvegarde des valeurs actuelles (pour log et fallback)
+    old_track_objects = TRACK_OBJECTS
+    old_conf_threshold = CONFIDENCE_THRESHOLD
+    old_dead_zone = DEAD_ZONE
+    old_cam_movement_enable = CAMERA_MOVEMENT_ENABLE
+
+    # Lecture (et parsing YAML) du nouveau config
+    new_config = load_config(config_path)
+
+    # Vérifier que c'est bien un dict
+    if not isinstance(new_config, dict):
+        logger.error("La configuration rechargée n'est pas un dictionnaire valide. (Aucun changement appliqué)")
         return
-    
-    # Mettre à jour les variables globales
-    TRACK_OBJECTS = config.get("track_objects", ["person", "cat"])
-    CONFIDENCE_THRESHOLD = config.get("confidence_threshold", 0.5)
-    DEAD_ZONE = config.get("dead_zone", 0.05)
-    SIZE_THRESHOLD = config.get("size_threshold", 100)
 
-    # Mettre à jour l'activation des mouvements de la caméra
-    CAMERA_MOVEMENT = config.get("camera_movement", {})
-    CAMERA_MOVEMENT_ENABLE = CAMERA_MOVEMENT.get("enable", True)
+    # On met à jour la variable globale config
+    config = new_config
 
-    # Mettre à jour l'état du CameraController
+    # ============================================
+    #      1) Mise à jour des variables globales
+    # ============================================
+
+    # 1.1) TRACK_OBJECTS
+    new_track_objects = new_config.get("track_objects", old_track_objects)
+    if isinstance(new_track_objects, list) and all(isinstance(obj, str) for obj in new_track_objects):
+        TRACK_OBJECTS = new_track_objects
+        # Log si la valeur a changé
+        if TRACK_OBJECTS != old_track_objects:
+            logger.info(f"track_objects mis à jour : {old_track_objects} -> {TRACK_OBJECTS}")
+    else:
+        logger.warning(f"track_objects invalide, on conserve {old_track_objects}")
+
+    # 1.2) CONFIDENCE_THRESHOLD
+    new_conf_threshold = new_config.get("confidence_threshold", old_conf_threshold)
+    if isinstance(new_conf_threshold, (int, float)):
+        CONFIDENCE_THRESHOLD = float(new_conf_threshold)
+        if CONFIDENCE_THRESHOLD != old_conf_threshold:
+            logger.info(f"confidence_threshold mis à jour : {old_conf_threshold} -> {CONFIDENCE_THRESHOLD}")
+    else:
+        logger.warning(f"confidence_threshold invalide, on conserve {old_conf_threshold}")
+
+    # 1.3) DEAD_ZONE
+    new_dead_zone = new_config.get("dead_zone", old_dead_zone)
+    if isinstance(new_dead_zone, (int, float)):
+        # On peut forcer l'intervalle [0,1] si besoin
+        if 0 <= new_dead_zone <= 1:
+            DEAD_ZONE = new_dead_zone
+            if DEAD_ZONE != old_dead_zone:
+                logger.info(f"dead_zone mis à jour : {old_dead_zone} -> {DEAD_ZONE}")
+        else:
+            logger.warning(f"dead_zone hors intervalle [0,1], on conserve {old_dead_zone}")
+    else:
+        logger.warning(f"dead_zone invalide, on conserve {old_dead_zone}")
+
+    # ============================================
+    #   2) Mise à jour de CAMERA_MOVEMENT_ENABLE
+    # ============================================
+    camera_movement_section = new_config.get("camera_movement", {})
+    if isinstance(camera_movement_section, dict):
+        new_cam_movement_enable = camera_movement_section.get("enable", old_cam_movement_enable)
+        if isinstance(new_cam_movement_enable, bool):
+            CAMERA_MOVEMENT_ENABLE = new_cam_movement_enable
+            if CAMERA_MOVEMENT_ENABLE != old_cam_movement_enable:
+                logger.info(f"CAMERA_MOVEMENT_ENABLE mis à jour : {old_cam_movement_enable} -> {CAMERA_MOVEMENT_ENABLE}")
+        else:
+            logger.warning(f"camera_movement.enable est invalide, on conserve {old_cam_movement_enable}")
+    else:
+        logger.warning("camera_movement n'est pas un dict, on garde l'ancienne configuration.")
+
+    # Log final sur l'état du mouvement
+    logger.info(f"CameraController movement enabled: {CAMERA_MOVEMENT_ENABLE}")
+
+    # =========================================================
+    #  3) Mise à jour de l'état CameraController (si présent)
+    # =========================================================
     if detection_app.state.user_data.camera_controller:
         detection_app.state.user_data.camera_controller.set_enable_movement(CAMERA_MOVEMENT_ENABLE)
 
-    # Mettre à jour les configurations PID et le seuil de taille
+    # ============================================
+    #  4) PID & camera_deplacement
+    # ============================================
     camera_deplacement = detection_app.state.user_data.camera_controller.camera_deplacement
-    camera_deplacement.pid_config = config.get("pid", {})
-    camera_deplacement.size_threshold = config.get("size_threshold", 100)
 
-    # Mettre à jour les seuils de zone morte
-    detection_app.state.user_data.dead_zone = config.get("dead_zone", 0.05)
+    # Mettre à jour le champ pid_config (ce n'est pas un usage critique, mais on le fait)
+    pid_config_candidate = new_config.get("pid", {})
+    if isinstance(pid_config_candidate, dict):
+        camera_deplacement.pid_config = pid_config_candidate
+    else:
+        logger.warning("pid_config invalide, on conserve la précédente (aucun impact direct si on recrée les PID).")
 
-    # Mettre à jour les angles min/max
-    camera_deplacement.horizontal_min_angle = CAMERA_MOVEMENT.get("horizontal_min_angle", 0)
-    camera_deplacement.horizontal_max_angle = CAMERA_MOVEMENT.get("horizontal_max_angle", 270)
-    camera_deplacement.vertical_min_angle = CAMERA_MOVEMENT.get("vertical_min_angle", 45)
-    camera_deplacement.vertical_max_angle = CAMERA_MOVEMENT.get("vertical_max_angle", 135)
+    # On récupère ce qu'on va mettre dans le nouveau PID
+    new_pid_config = new_config.get("pid", {})
+    horizontal_pid = new_pid_config.get("horizontal", {})
+    vertical_pid = new_pid_config.get("vertical", {})
 
-    # Mettre à jour les servos avec les nouvelles configurations
-    camera_deplacement.servo_horizontal.channel = config.get("servo", {}).get("channel_horizontal", 0)
-    camera_deplacement.servo_vertical.channel = config.get("servo", {}).get("channel_vertical", 1)
-    camera_deplacement.servo_horizontal.set_servo_angle(camera_deplacement.servo_horizontal.current_angle)
-    camera_deplacement.servo_vertical.set_servo_angle(camera_deplacement.servo_vertical.current_angle)
-    
-    # Mettre à jour les paramètres de suivi
-    tracking_config = config.get("tracking", {})
+    # Sécuriser l'accès aux 3 coefficients horizontal
+    # (en cas de clé manquante, on met 0 ou la valeur qu'on veut)
+    kp_h = horizontal_pid.get("kp", 0)
+    ki_h = horizontal_pid.get("ki", 0)
+    kd_h = horizontal_pid.get("kd", 0)
+
+    # Pareil vertical
+    kp_v = vertical_pid.get("kp", 0)
+    ki_v = vertical_pid.get("ki", 0)
+    kd_v = vertical_pid.get("kd", 0)
+
+    # On recrée les PID comme dans le code existant
+    old_pid_x = (camera_deplacement.pid_x.kp,
+                 camera_deplacement.pid_x.ki,
+                 camera_deplacement.pid_x.kd)
+    old_pid_y = (camera_deplacement.pid_y.kp,
+                 camera_deplacement.pid_y.ki,
+                 camera_deplacement.pid_y.kd)
+
+    try:
+        camera_deplacement.pid_x = PID(
+            kp=float(kp_h),
+            ki=float(ki_h),
+            kd=float(kd_h),
+            setpoint=0.5,
+            output_limits=(-150, 150)
+        )
+        camera_deplacement.pid_y = PID(
+            kp=float(kp_v),
+            ki=float(ki_v),
+            kd=float(kd_v),
+            setpoint=0.5,
+            output_limits=(-50, 50)
+        )
+        new_pid_x = (camera_deplacement.pid_x.kp,
+                     camera_deplacement.pid_x.ki,
+                     camera_deplacement.pid_x.kd)
+        new_pid_y = (camera_deplacement.pid_y.kp,
+                     camera_deplacement.pid_y.ki,
+                     camera_deplacement.pid_y.kd)
+
+        # Log si ça a changé
+        if new_pid_x != old_pid_x:
+            logger.info(f"PID X mis à jour : {old_pid_x} -> {new_pid_x}")
+        if new_pid_y != old_pid_y:
+            logger.info(f"PID Y mis à jour : {old_pid_y} -> {new_pid_y}")
+    except Exception as e:
+        logger.warning(f"Impossible de recréer les PID : {e}. On conserve les PID précédents.")
+        
+    fader_config = new_config.get("fader", {})
+    camera_deplacement = detection_app.state.user_data.camera_controller.camera_deplacement
+    camera_deplacement.fader_config = fader_config
+    camera_deplacement.fader_enable = fader_config.get("enable", False)
+    camera_deplacement.fader_max_distance = float(fader_config.get("max_distance", 0.5))
+    camera_deplacement.fader_min_factor = float(fader_config.get("min_factor", 0.2))
+    camera_deplacement.fader_max_factor = float(fader_config.get("max_factor", 1.0))
+
+    # Zone morte dans user_data
+    old_dead_zone_app = detection_app.state.user_data.dead_zone
+    detection_app.state.user_data.dead_zone = DEAD_ZONE
+    if detection_app.state.user_data.dead_zone != old_dead_zone_app:
+        logger.info(f"dead_zone application mis à jour : "
+                    f"{old_dead_zone_app} -> {detection_app.state.user_data.dead_zone}")
+
+    # ============================================
+    #  5) Angles min/max de la caméra
+    # ============================================
+    # On applique la logique d'origine (pas de grosses vérifications).
+    camera_deplacement.horizontal_min_angle = camera_movement_section.get("horizontal_min_angle", 0)
+    camera_deplacement.horizontal_max_angle = camera_movement_section.get("horizontal_max_angle", 270)
+    camera_deplacement.vertical_min_angle = camera_movement_section.get("vertical_min_angle", 45)
+    camera_deplacement.vertical_max_angle = camera_movement_section.get("vertical_max_angle", 135)
+
+    # ============================================
+    #  6) Servos
+    # ============================================
+    servo_config_candidate = new_config.get("servo", {})
+    if isinstance(servo_config_candidate, dict):
+        old_chan_h = camera_deplacement.servo_horizontal.channel
+        old_chan_v = camera_deplacement.servo_vertical.channel
+
+        new_chan_h = servo_config_candidate.get("channel_horizontal", old_chan_h)
+        new_chan_v = servo_config_candidate.get("channel_vertical", old_chan_v)
+
+        camera_deplacement.servo_horizontal.channel = new_chan_h
+        camera_deplacement.servo_vertical.channel = new_chan_v
+
+        # Log si ça a changé
+        if new_chan_h != old_chan_h:
+            logger.info(f"servo_horizontal.channel mis à jour : {old_chan_h} -> {new_chan_h}")
+        if new_chan_v != old_chan_v:
+            logger.info(f"servo_vertical.channel mis à jour : {old_chan_v} -> {new_chan_v}")
+
+        # On repositionne les angles
+        camera_deplacement.servo_horizontal.set_servo_angle(camera_deplacement.servo_horizontal.current_angle)
+        camera_deplacement.servo_vertical.set_servo_angle(camera_deplacement.servo_vertical.current_angle)
+    else:
+        logger.warning("servo n'est pas un dict valide, on garde les canaux servo existants.")
+
+    # ============================================
+    #  7) Paramètres de suivi (tracking)
+    # ============================================
+    tracking_config = new_config.get("tracking", {})
+    if not isinstance(tracking_config, dict):
+        logger.warning("tracking n'est pas un dictionnaire valide, on conserve les anciens paramètres tracker.")
+        tracking_config = {}
+
     max_age = tracking_config.get("max_age", 30)
     min_hits = tracking_config.get("min_hits", 3)
     iou_threshold = tracking_config.get("iou_threshold", 0.3)
     dt = tracking_config.get("dt", 1/25)
-    Q = tracking_config.get("kalman_filter", {}).get("Q", None)
-    R = tracking_config.get("kalman_filter", {}).get("R", None)
+    kalman_section = tracking_config.get("kalman_filter", {})
+    if not isinstance(kalman_section, dict):
+        kalman_section = {}
+    Q = kalman_section.get("Q", None)
+    R = kalman_section.get("R", None)
 
     # Mettre à jour le tracker DeepSORT
     if detection_app.state.user_data.deep_sort_tracker:
@@ -754,9 +891,10 @@ def reload_config(detection_app: 'DetectionApp', config_path: str = "config.yaml
             R=R
         )
 
-    logger.info("Configuration rechargée et appliquée.")
+    logger.info("Configuration rechargée et appliquée (avec vérification et fallback).")
 
-# =============================
+
+# ========================================
 # =============== MAIN ===================
 # ========================================
 class DetectionApp:
@@ -853,7 +991,6 @@ class DetectionApp:
         # Mettre à jour les PID configurations
         camera_deplacement = self.state.user_data.camera_controller.camera_deplacement
         camera_deplacement.pid_config = new_config.get("pid", {})
-        camera_deplacement.size_threshold = new_config.get("size_threshold", 100)
 
         # Mettre à jour les seuils de zone morte
         self.state.user_data.dead_zone = new_config.get("dead_zone", 0.05)
@@ -908,14 +1045,15 @@ class DetectionApp:
             pid_config=config.get("pid", {}),
             servo_config=config.get("servo", {}),
             camera_movement_config=config.get("camera_movement", {}),
-            dead_zone=DEAD_ZONE
+            fader_config=config.get("fader", {})
         )
         camera_deplacement.position_zero()
+        # camera_deplacement.position_turn()
         logger.info("Déplacement de la caméra initialisé et positionné à zéro.")
 
         # Initialiser le TrackSelector et le CameraController
         self.state.user_data.track_selector = TrackSelector()
-        self.state.user_data.camera_controller = CameraController(camera_deplacement)
+        self.state.user_data.camera_controller = CameraController(camera_deplacement, self.state.user_data)
         logger.info("TrackSelector et CameraController initialisés.")
 
         # Récupérer le cairo_overlay pour dessiner
@@ -945,7 +1083,7 @@ class DetectionApp:
         pass  # Cette méthode est désormais obsolète
 
 # ========================================
-# ======= APPLICATION CALLBACK ========
+# ======= APPLICATION CALLBACK ===========
 # ========================================
 def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data: UserAppCallback) -> Gst.PadProbeReturn:
     """
@@ -1065,6 +1203,25 @@ def draw_overlay(cairo_overlay: Any, cr: cairo.Context, timestamp: int, duration
         cr.arc(bx, by, 5, 0, 2 * 3.14159)
         cr.fill()
 
+    # --- AFFICHAGE FADER EN VIOLET ---
+    # Suppose qu'on récupère fader_config dans user_data, ou alors 
+    # on lit directement config["fader"]["max_distance"] si accessible.
+    # Ex. (à adapter selon comment vous stockez le fader):
+    fader_config = config.get("fader", {})
+    fader_enable = fader_config.get("enable", False)
+    fader_max_distance = fader_config.get("max_distance", 0.5)
+
+    if fader_enable:
+        # rayon pour le fader
+        radius_fader = fader_max_distance * min_dimension
+
+        # couleur violette (R, G, B)
+        # par ex. violet = (1, 0, 1)
+        cr.set_source_rgb(1, 0, 1)  
+        
+        cr.arc(width / 2, height / 2, radius_fader, 0, 2 * 3.14159)
+        cr.stroke()
+        
     cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
     cr.set_font_size(14)
 
