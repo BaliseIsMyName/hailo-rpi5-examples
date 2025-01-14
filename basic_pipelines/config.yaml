@@ -9,18 +9,18 @@ track_objects:
 confidence_threshold: 0.6
 
 # Zone morte de l'image (valeur entre 0 et 1)
-dead_zone: 0.03
+dead_zone: 0.05
 
 # Paramètres PID pour le contrôle horizontal et vertical des servos
 pid:
   horizontal:
-    kp: 40
-    ki: 0.5
-    kd: 4
+    kp: 200
+    ki: 0.1
+    kd: 10
   vertical:
-    kp: 40
-    ki: 0.5
-    kd: 4
+    kp: 200
+    ki: 0.1
+    kd: 10
 
 # Paramètres du fader PID
 fader:
@@ -61,7 +61,7 @@ tracking:
   max_age: 30                        # Nombre maximal de frames sans mise à jour avant suppression de la piste
   min_hits: 3                        # Nombre minimal de mises à jour réussies avant d'afficher la piste
   iou_threshold: 0.2                 # Seuil IoU pour l'association des détections
-  dt: 0.04                           # Intervalle de temps entre les mises à jour pour le filtre de Kalman
+  dt: 0.03                           # Intervalle de temps entre les mises à jour pour le filtre de Kalman
   kalman_filter:
     Q:                                # Bruit du modèle (matrice Q)
       - [1, 0, 0, 0, 0, 0]        # incertirtude sur la position horizontale

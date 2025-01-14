@@ -346,14 +346,14 @@ class CameraDeplacement:
             ki=pid_config['horizontal']['ki'],
             kd=pid_config['horizontal']['kd'],
             setpoint=0.5,
-            output_limits=(-150, 150)
+            output_limits=(-300, 300)
         )
         self.pid_y: PID = PID(
             kp=pid_config['vertical']['kp'],
             ki=pid_config['vertical']['ki'],
             kd=pid_config['vertical']['kd'],
             setpoint=0.5,
-            output_limits=(-50, 50)
+            output_limits=(-300, 300)
         )
 
         # self.dead_zone: float = dead_zone
@@ -386,13 +386,17 @@ class CameraDeplacement:
             dy = y_center - 0.5
             distance = (dx*dx + dy*dy)**0.5  # sqrt(dx^2 + dy^2)
             
+            gamma = 1.2  # Paramètre que vous pouvez mettre dans config.yaml si vous voulez
+            
             # ratio dans [0,1]
             ratio = distance / self.fader_max_distance
             ratio = max(0.0, min(1.0, ratio))
+            ratio_pow = ratio ** gamma
             
             # interpolation
             # ex. fader = min_factor + ratio * (max_factor - min_factor)
-            fader_value = self.fader_min_factor + ratio*(self.fader_max_factor - self.fader_min_factor)
+            # fader_value = self.fader_min_factor + ratio*(self.fader_max_factor - self.fader_min_factor)
+            fader_value = self.fader_min_factor + ratio_pow * (self.fader_max_factor - self.fader_min_factor)
 
             # appliquer le fader
             x_correction *= fader_value
