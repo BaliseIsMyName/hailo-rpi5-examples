@@ -89,6 +89,7 @@ class GStreamerDetectionApp(GStreamerApp):
 
         self.create_pipeline()
 
+
     def get_pipeline_string(self):
         source_pipeline = SOURCE_PIPELINE(self.video_source)
         detection_pipeline = INFERENCE_PIPELINE(
@@ -125,6 +126,12 @@ class GStreamerDetectionApp(GStreamerApp):
             f'x264enc tune=zerolatency bitrate=1200 speed-preset=superfast key-int-max=30 ! '
             f'flvmux streamable=true ! '
             f'rtmpsink location="rtmp://localhost/live/stream live=1" '
+            f't. ! queue ! '
+            f'x264enc tune=zerolatency bitrate=1200 speed-preset=superfast key-int-max=30 ! '
+            f'h264parse config-interval=1 ! '
+            f'capsfilter caps="video/x-h264,stream-format=(string)avc,alignment=(string)au" ! '
+            f'rtph264pay config-interval=1 pt=96 ssrc=123456 ! '
+            f'multiudpsink clients=127.0.0.1:48452 sync=false async=false'
         )
         print(pipeline_string)
         return pipeline_string

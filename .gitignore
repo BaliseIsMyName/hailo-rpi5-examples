@@ -173,3 +173,7 @@ basic_pipelines/gstshark*
 #note perso
 basic_pipelines/note.md
 basic_pipelines/resume_filtre_de_kalman.md
+
+#node.js
+basic_pipelines/my-mediasoup/node_modules/
+basic_pipelines/frontend/node_modules/

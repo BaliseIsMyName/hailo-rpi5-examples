@@ -126,6 +126,14 @@ async def read_stream(request: Request, current_user: schemas.User = Depends(oau
             "user": current_user,
             "stream_url": STREAM_URL  # Passer l'URL du flux au template
       })
+      
+# Page protégée (stream)
+@app.get("/stream2", response_class=HTMLResponse)
+async def read_stream(request: Request, current_user: schemas.User = Depends(oauth2.get_current_user)):
+      return templates.TemplateResponse("stream2.html", {
+            "request": request,
+            "user": current_user
+      })
 
 @app.get("/profile", response_class=HTMLResponse)
 async def get_profile(request: Request, current_user: schemas.User = Depends(oauth2.get_current_user)):

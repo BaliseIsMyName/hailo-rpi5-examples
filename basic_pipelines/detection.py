@@ -43,11 +43,11 @@ logger = logging.getLogger(__name__)
 
 # Configuration spécifique pour ServoController
 servo_logger = logging.getLogger('ServoController')
-servo_logger.setLevel(logging.DEBUG)  # Activer DEBUG uniquement pour ServoController
+servo_logger.setLevel(logging.INFO)  # Activer DEBUG uniquement pour ServoController
 
 # Configuration spécifique pour PID
 pid_logger = logging.getLogger('PID')
-pid_logger.setLevel(logging.DEBUG)  # Activer DEBUG uniquement pour PID
+pid_logger.setLevel(logging.INFO)  # Activer DEBUG uniquement pour PID
 
 # =============================
 # ========= CONSTANTES ========

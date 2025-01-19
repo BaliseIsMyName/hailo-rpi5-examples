@@ -9,7 +9,7 @@ track_objects:
 confidence_threshold: 0.6
 
 # Zone morte de l'image (valeur entre 0 et 1)
-dead_zone: 0.05
+dead_zone: 0.1
 
 # Paramètres PID pour le contrôle horizontal et vertical des servos
 pid:
@@ -32,7 +32,7 @@ fader:
 # Paramètres des servos
 servo:
   channel_horizontal: 0
-  channel_vertical: 1
+  channel_vertical: 15
   freq: 50
   i2c_address: 0x40
   servo_min_us: 500
@@ -42,7 +42,7 @@ servo:
 
 # Paramètres de déplacement de la caméra
 camera_movement:
-  enable: True
+  enable: False
   horizontal_min_angle: 0
   horizontal_max_angle: 270
   vertical_min_angle: 45

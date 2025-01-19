@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+
+{% block title %}Stream WebRTC{% endblock %}
+
+{% block content %}
+<div style="text-align: center;">
+      <h2>Flux WebRTC</h2>
+      <!-- La vidéo qui affichera le flux -->
+      <video id="myVideo" autoplay playsinline controls muted style="width: 640px; border: 1px solid #333;"></video>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="/static/js/webrtc.bundle.js"></script>
+{% endblock %}
+
