@@ -42,7 +42,7 @@ servo:
 
 # Paramètres de déplacement de la caméra
 camera_movement:
-  enable: False
+  enable: true
   horizontal_min_angle: 0
   horizontal_max_angle: 270
   vertical_min_angle: 45
