@@ -67,7 +67,7 @@ async def blinking():
                 # Allume bleu, éteint rouge
                 set_led_state(blue=0, green=1, red=1)
             toggle = not toggle
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.1)
     except asyncio.CancelledError:
         return
 
@@ -81,10 +81,10 @@ async def blinking_red_rapide():
         while True:
             # Rouge allumé
             set_led_state(blue=1, green=1, red=0)
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.1)
             # Toutes éteintes
             set_led_state(blue=1, green=1, red=1)
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.1)
     except asyncio.CancelledError:
         return
 
@@ -125,15 +125,23 @@ async def shutdown_sequence():
     red_blink_task = asyncio.create_task(blinking_red_rapide())
 
     # Tenter d'arrêter explicitement les services
-    subprocess.run(["sudo", "systemctl", "stop", "wetthecat.service"])
-    subprocess.run(["sudo", "systemctl", "stop", "uvicorn.service"])
+    subprocess.run([
+            "sudo", "-u", "raspi",
+            "env", "XDG_RUNTIME_DIR=/run/user/1000",
+            "systemctl", "--user", "stop", "wetthecat.service"
+            ])
+    subprocess.run([
+            "sudo", "-u", "raspi",
+            "env", "XDG_RUNTIME_DIR=/run/user/1000",
+            "systemctl", "--user", "stop", "uvicorn.service"
+            ])
 
     print("Attente de l'arrêt des services...")
     while not services_stopped(services):
-        await asyncio.sleep(50)
+        await asyncio.sleep(15)
 
     # On peut ajouter un délai supplémentaire pour s'assurer que les routines de fin ont le temps de s'exécuter
-    await asyncio.sleep(15)
+    await asyncio.sleep(10)
 
     # Annuler le clignotement rouge rapide
     red_blink_task.cancel()

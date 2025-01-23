@@ -485,10 +485,44 @@ class CameraController:
         # Attributs pour la gestion des logs significatifs
         self.last_logged_movement: Optional[Tuple[float, float]] = None
         self.movement_threshold: float = 0.03  # Seuil de mouvement significatif (ajustez selon vos besoins)
+        
+        self.persistent_mode: int = CAMERA_MODE  # mode demandé dans config
+        self.camera_mode: int = CAMERA_MODE  # mode effectif au runtime
+        self.last_detection_time: float = 0.0
+        self.detection_timeout: float = 5.0  # 5s sans détection => retour mode 1 (si persistent_mode=1)
+
+        # Variables pour le balayage (Mode 1)
+        self.scan_speed = CAMERA_MOVEMENT.get("scan_speed", 2)   # degrés par itération
+        self.scan_period = CAMERA_MOVEMENT.get("scan_period", 10)  # secondes entre balayages
+        self.next_scan_time = 0.0
+        self.scanning_in_progress = False
+        self.scanning_angle = 0.0
+        self.scanning_direction = +1  # +1 = va vers la droite, -1 = retour
+        
         self.user_data: UserAppCallback = user_data
         self.thread: threading.Thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
+    def set_persistent_mode(self, mode: int) -> None:
+        with self.lock:
+            self.persistent_mode = mode
+            logger.info(f"CameraController -> persistent_mode={mode}")
+
+            if mode == 2:
+                # on se cale tout de suite en mode 2
+                self.camera_mode = 2
+            elif mode == 0:
+                # on se cale en mode 0
+                self.camera_mode = 0
+            else:
+                # mode=1
+                self.camera_mode = 1
+                
+    def set_mode(self, mode: int) -> None:
+        with self.lock:
+            self.camera_mode = mode
+            logger.info(f"CameraController passe en mode={mode}")
+            
     def set_enable_movement(self, enable: bool) -> None:
         with self.lock:
             self.enable_movement = enable
@@ -504,24 +538,69 @@ class CameraController:
             with self.lock:
                 center = self.current_center
                 time_since_update = self.time_since_update
-                enable_movement = self.enable_movement  # Récupérer l'état d'activation
-                dead_zone: float = self.user_data.dead_zone
-            
-            if enable_movement:
+                camera_mode = self.camera_mode
+                dead_zone = self.user_data.dead_zone
+                p_mode = self.persistent_mode  # persistent mode
+
+            # Mode 0 = fixe
+            if camera_mode == 0:
+                self.camera_deplacement.position_zero()
+                time.sleep(0.5)
+                continue
+
+            # Mode 1 = balayage
+            elif camera_mode == 1:
+                # Vérifier détection
                 if center is not None and time_since_update == 0:
+                    with self.lock:
+                        self.camera_mode = 2
+                        self.last_detection_time = time.time()
+                    logger.info("Détection trouvée en mode 1 : passage en mode 2 (suivi).")
+                    continue
+                # Sinon balayage
+                self.handle_scanning()
+
+            # Mode 2 = suivi
+            else:  # camera_mode == 2
+                if center is not None and time_since_update == 0:
+                    # Mise à jour last_detection_time
+                    self.last_detection_time = time.time()
+
                     x_center, y_center = center
-                    # Vérifier si l'objet est en dehors de la zone morte
-                    if (abs(x_center - 0.5) > dead_zone or
-                            abs(y_center - 0.5) > dead_zone):
+                    if (abs(x_center - 0.5) > dead_zone or abs(y_center - 0.5) > dead_zone):
                         self.camera_deplacement.update_position(x_center, y_center)
-                        self.movement = (x_center, y_center)
                     else:
                         self.camera_deplacement.update_position(0.5, 0.5)
                 else:
+                    # Aucune détection => se replacer au centre
                     self.camera_deplacement.update_position(0.5, 0.5)
-            else:
+
+                    # Vérifier s'il faut repasser en mode 1
+                    # UNIQUEMENT si persistent_mode == 1
+                    if p_mode == 1:
+                        now = time.time()
+                        if now - self.last_detection_time > self.detection_timeout:
+                            with self.lock:
+                                self.camera_mode = 1
+                            logger.info("Aucune détection récente : retour au mode 1 (balayage).")
+
+            time.sleep(0.01)
+            
+            # if enable_movement:
+            #     if center is not None and time_since_update == 0:
+            #         x_center, y_center = center
+            #         # Vérifier si l'objet est en dehors de la zone morte
+            #         if (abs(x_center - 0.5) > dead_zone or
+            #                 abs(y_center - 0.5) > dead_zone):
+            #             self.camera_deplacement.update_position(x_center, y_center)
+            #             self.movement = (x_center, y_center)
+            #         else:
+            #             self.camera_deplacement.update_position(0.5, 0.5)
+            #     else:
+            #         self.camera_deplacement.update_position(0.5, 0.5)
+            # else:
                 
-                self.camera_deplacement.update_position(0.5, 0.5)
+            #     self.camera_deplacement.update_position(0.5, 0.5)
                 
             # Gestion des logs significatifs
             if self.is_significant_movement(self.movement):
@@ -529,6 +608,48 @@ class CameraController:
                 self.last_logged_movement = self.movement
                 
             time.sleep(0.01)  # Ajuster la fréquence selon les besoins
+
+    def handle_scanning(self) -> None:
+        """
+        Gère le balayage horizontal en mode 1.
+        - La caméra part de 0° et va jusqu'à 270°, puis revient à 0°, etc.
+        - On effectue un balayage complet toutes les 'scan_period' secondes.
+        """
+        now = time.time()
+        # Si on n'est pas en cours de balayage
+        if not self.scanning_in_progress:
+            if now >= self.next_scan_time:
+                # Démarrage d'un nouveau balayage
+                logger.info("Démarrage du balayage horizontal.")
+                self.scanning_in_progress = True
+                self.scanning_angle = self.camera_deplacement.horizontal_min_angle
+                self.scanning_direction = +1
+            else:
+                # Attendre la prochaine fenêtre
+                self.camera_deplacement.position_zero()
+                return
+
+        # On est en plein balayage
+        new_angle = self.scanning_angle + self.scanning_direction * self.scan_speed
+        # Saturation
+        if new_angle >= self.camera_deplacement.horizontal_max_angle:
+            new_angle = self.camera_deplacement.horizontal_max_angle
+            self.scanning_direction = -1
+        elif new_angle <= self.camera_deplacement.horizontal_min_angle:
+            new_angle = self.camera_deplacement.horizontal_min_angle
+            # Fin du balayage -> on revient à la position 0 -> stop
+            self.scanning_in_progress = False
+            self.next_scan_time = time.time() + self.scan_period
+            logger.info("Balayage terminé, on attend la prochaine période.")
+        
+        self.scanning_angle = new_angle
+        # Mettre à jour servo horizontal
+        self.camera_deplacement.servo_horizontal.set_servo_angle(self.scanning_angle)
+        # On garde l'angle vertical inchangé ou à mi-chemin
+        self.camera_deplacement.servo_vertical.set_servo_angle(
+            (self.camera_deplacement.vertical_min_angle + self.camera_deplacement.vertical_max_angle)/2.0
+        )
+        
 
     def is_significant_movement(self, current_movement: Tuple[float, float]) -> bool:
         """
@@ -599,6 +720,7 @@ SERVO_CONFIG = config.get("servo", {})
 # Camera Movement Parameters
 CAMERA_MOVEMENT = config.get("camera_movement", {})
 CAMERA_MOVEMENT_ENABLE: bool = CAMERA_MOVEMENT.get("enable", True)
+CAMERA_MODE: int = CAMERA_MOVEMENT.get("mode", 2)  # 2 = valeur par défaut (suivi)
 
 # Window Mover Parameters
 WINDOW_MOVER_CONFIG = config.get("window_mover", {})
@@ -671,13 +793,14 @@ def reload_config(detection_app: 'DetectionApp', config_path: str = "config.yaml
         detection_app (DetectionApp): Instance de l'application de détection.
         config_path (str): Chemin vers le fichier de configuration.
     """
-    global config, TRACK_OBJECTS, CONFIDENCE_THRESHOLD, DEAD_ZONE, CAMERA_MOVEMENT_ENABLE
+    global config, TRACK_OBJECTS, CONFIDENCE_THRESHOLD, DEAD_ZONE, CAMERA_MOVEMENT_ENABLE, CAMERA_MODE
 
     # Sauvegarde des valeurs actuelles (pour log et fallback)
     old_track_objects = TRACK_OBJECTS
     old_conf_threshold = CONFIDENCE_THRESHOLD
     old_dead_zone = DEAD_ZONE
     old_cam_movement_enable = CAMERA_MOVEMENT_ENABLE
+    old_cam_mode = CAMERA_MODE
 
     # Lecture (et parsing YAML) du nouveau config
     new_config = load_config(config_path)
@@ -728,39 +851,84 @@ def reload_config(detection_app: 'DetectionApp', config_path: str = "config.yaml
 
     # ============================================
     #   2) Mise à jour de CAMERA_MOVEMENT_ENABLE
+    #      et CAMERA_MODE
     # ============================================
     camera_movement_section = new_config.get("camera_movement", {})
     if isinstance(camera_movement_section, dict):
+        # 2.1) enable
         new_cam_movement_enable = camera_movement_section.get("enable", old_cam_movement_enable)
+        new_scan_speed = camera_movement_section.get("scan_speed", None)
+        new_scan_period = camera_movement_section.get("scan_period", None)
         if isinstance(new_cam_movement_enable, bool):
             CAMERA_MOVEMENT_ENABLE = new_cam_movement_enable
             if CAMERA_MOVEMENT_ENABLE != old_cam_movement_enable:
-                logger.info(f"CAMERA_MOVEMENT_ENABLE mis à jour : {old_cam_movement_enable} -> {CAMERA_MOVEMENT_ENABLE}")
+                logger.info(
+                    f"CAMERA_MOVEMENT_ENABLE mis à jour : "
+                    f"{old_cam_movement_enable} -> {CAMERA_MOVEMENT_ENABLE}"
+                )
         else:
-            logger.warning(f"camera_movement.enable est invalide, on conserve {old_cam_movement_enable}")
+            logger.warning(
+                f"camera_movement.enable est invalide, on conserve {old_cam_movement_enable}"
+            )
+
+        # 2.2) mode (0,1,2)
+        new_cam_mode = camera_movement_section.get("mode", old_cam_mode)
+        if isinstance(new_cam_mode, int) and new_cam_mode in [0, 1, 2]:
+            CAMERA_MODE = new_cam_mode
+            if CAMERA_MODE != old_cam_mode:
+                logger.info(f"CAMERA_MODE mis à jour : {old_cam_mode} -> {CAMERA_MODE}")
+        else:
+            logger.warning(
+                f"camera_movement.mode est invalide ou hors plage [0,1,2], "
+                f"on conserve {old_cam_mode}"
+            )
     else:
         logger.warning("camera_movement n'est pas un dict, on garde l'ancienne configuration.")
 
     # Log final sur l'état du mouvement
-    logger.info(f"CameraController movement enabled: {CAMERA_MOVEMENT_ENABLE}")
+    logger.info(f"CameraController movement enabled: {CAMERA_MOVEMENT_ENABLE}, mode: {CAMERA_MODE}")
 
     # =========================================================
     #  3) Mise à jour de l'état CameraController (si présent)
     # =========================================================
     if detection_app.state.user_data.camera_controller:
+        # On met d'abord à jour l'activation (héritée de l'ancien code)
         detection_app.state.user_data.camera_controller.set_enable_movement(CAMERA_MOVEMENT_ENABLE)
+        # Puis on met à jour le mode
+        detection_app.state.user_data.camera_controller.set_persistent_mode(CAMERA_MODE)
+        camera_controller = detection_app.state.user_data.camera_controller
+        
+        # enable mouvement + mode
+        camera_controller.set_enable_movement(CAMERA_MOVEMENT_ENABLE)
+        camera_controller.set_persistent_mode(CAMERA_MODE)
+            # Appliquer scan_speed s’il est valide
+        if isinstance(new_scan_speed, (int, float)):
+            camera_controller.scan_speed = float(new_scan_speed)
+            logger.info(f"scan_speed mis à jour -> {camera_controller.scan_speed}")
+        else:
+            logger.info(f"scan_speed inchangé (valeur invalide ou non spécifiée).")
+        
+        # Appliquer scan_period s’il est valide
+        if isinstance(new_scan_period, (int, float)):
+            camera_controller.scan_period = float(new_scan_period)
+            logger.info(f"scan_period mis à jour -> {camera_controller.scan_period}")
+        else:
+            logger.info(f"scan_period inchangé (valeur invalide ou non spécifiée).")
 
     # ============================================
     #  4) PID & camera_deplacement
     # ============================================
     camera_deplacement = detection_app.state.user_data.camera_controller.camera_deplacement
 
-    # Mettre à jour le champ pid_config (ce n'est pas un usage critique, mais on le fait)
+    # Mettre à jour le champ pid_config
     pid_config_candidate = new_config.get("pid", {})
     if isinstance(pid_config_candidate, dict):
         camera_deplacement.pid_config = pid_config_candidate
     else:
-        logger.warning("pid_config invalide, on conserve la précédente (aucun impact direct si on recrée les PID).")
+        logger.warning(
+            "pid_config invalide, on conserve la précédente "
+            "(aucun impact direct si on recrée les PID)."
+        )
 
     # On récupère ce qu'on va mettre dans le nouveau PID
     new_pid_config = new_config.get("pid", {})
@@ -768,7 +936,6 @@ def reload_config(detection_app: 'DetectionApp', config_path: str = "config.yaml
     vertical_pid = new_pid_config.get("vertical", {})
 
     # Sécuriser l'accès aux 3 coefficients horizontal
-    # (en cas de clé manquante, on met 0 ou la valeur qu'on veut)
     kp_h = horizontal_pid.get("kp", 0)
     ki_h = horizontal_pid.get("ki", 0)
     kd_h = horizontal_pid.get("kd", 0)
@@ -814,10 +981,12 @@ def reload_config(detection_app: 'DetectionApp', config_path: str = "config.yaml
         if new_pid_y != old_pid_y:
             logger.info(f"PID Y mis à jour : {old_pid_y} -> {new_pid_y}")
     except Exception as e:
-        logger.warning(f"Impossible de recréer les PID : {e}. On conserve les PID précédents.")
-        
+        logger.warning(
+            f"Impossible de recréer les PID : {e}. On conserve les PID précédents."
+        )
+
+    # Mise à jour du fader
     fader_config = new_config.get("fader", {})
-    camera_deplacement = detection_app.state.user_data.camera_controller.camera_deplacement
     camera_deplacement.fader_config = fader_config
     camera_deplacement.fader_enable = fader_config.get("enable", False)
     camera_deplacement.fader_max_distance = float(fader_config.get("max_distance", 0.5))
@@ -828,13 +997,14 @@ def reload_config(detection_app: 'DetectionApp', config_path: str = "config.yaml
     old_dead_zone_app = detection_app.state.user_data.dead_zone
     detection_app.state.user_data.dead_zone = DEAD_ZONE
     if detection_app.state.user_data.dead_zone != old_dead_zone_app:
-        logger.info(f"dead_zone application mis à jour : "
-                    f"{old_dead_zone_app} -> {detection_app.state.user_data.dead_zone}")
+        logger.info(
+            f"dead_zone application mis à jour : "
+            f"{old_dead_zone_app} -> {detection_app.state.user_data.dead_zone}"
+        )
 
     # ============================================
     #  5) Angles min/max de la caméra
     # ============================================
-    # On applique la logique d'origine (pas de grosses vérifications).
     camera_deplacement.horizontal_min_angle = camera_movement_section.get("horizontal_min_angle", 0)
     camera_deplacement.horizontal_max_angle = camera_movement_section.get("horizontal_max_angle", 270)
     camera_deplacement.vertical_min_angle = camera_movement_section.get("vertical_min_angle", 45)
@@ -861,8 +1031,12 @@ def reload_config(detection_app: 'DetectionApp', config_path: str = "config.yaml
             logger.info(f"servo_vertical.channel mis à jour : {old_chan_v} -> {new_chan_v}")
 
         # On repositionne les angles
-        camera_deplacement.servo_horizontal.set_servo_angle(camera_deplacement.servo_horizontal.current_angle)
-        camera_deplacement.servo_vertical.set_servo_angle(camera_deplacement.servo_vertical.current_angle)
+        camera_deplacement.servo_horizontal.set_servo_angle(
+            camera_deplacement.servo_horizontal.current_angle
+        )
+        camera_deplacement.servo_vertical.set_servo_angle(
+            camera_deplacement.servo_vertical.current_angle
+        )
     else:
         logger.warning("servo n'est pas un dict valide, on garde les canaux servo existants.")
 
@@ -871,7 +1045,10 @@ def reload_config(detection_app: 'DetectionApp', config_path: str = "config.yaml
     # ============================================
     tracking_config = new_config.get("tracking", {})
     if not isinstance(tracking_config, dict):
-        logger.warning("tracking n'est pas un dictionnaire valide, on conserve les anciens paramètres tracker.")
+        logger.warning(
+            "tracking n'est pas un dictionnaire valide, "
+            "on conserve les anciens paramètres tracker."
+        )
         tracking_config = {}
 
     max_age = tracking_config.get("max_age", 30)

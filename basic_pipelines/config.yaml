@@ -42,11 +42,14 @@ servo:
 
 # Paramètres de déplacement de la caméra
 camera_movement:
-  enable: true
+  mode: 1       # 0 = fixe, 1 = balayage périodique, 2 = suivi normal
+  enable: False       #Ancien flag conservé mais on va se baser sur "mode"
   horizontal_min_angle: 0
   horizontal_max_angle: 270
   vertical_min_angle: 45
   vertical_max_angle: 135
+  scan_speed: 1   #vitesse de balayage (degrés par itération)
+  scan_period: 15   #Temps (sec) entre deux balayages
 
 # Paramètres pour déplacer la fenêtre de l'application
 window_mover:
