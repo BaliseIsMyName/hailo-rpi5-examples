@@ -1,17 +1,8 @@
-# config.yaml
-
-# Objets à suivre
 track_objects:
-  - person
-  - cat  # Ajoutez ou supprimez des objets ici
-
-# Seuil de confiance pour les détections
+- person
+- cat
 confidence_threshold: 0.6
-
-# Zone morte de l'image (valeur entre 0 et 1)
 dead_zone: 0.1
-
-# Paramètres PID pour le contrôle horizontal et vertical des servos
 pid:
   horizontal:
     kp: 200
@@ -21,62 +12,92 @@ pid:
     kp: 200
     ki: 0.1
     kd: 10
-
-# Paramètres du fader PID
 fader:
-  enable: true          # Active/désactive la logique de fader
-  max_distance: 0.5     # Au-delà de 0.5 (distance normalisée), on applique max_factor
-  min_factor: 0.1       # Facteur minimum (proche du centre)
-  max_factor: 1       # Facteur maximum (loin du centre)
-
-# Paramètres des servos
+  enable: true
+  max_distance: 0.5
+  min_factor: 0.1
+  max_factor: 1
 servo:
   channel_horizontal: 0
   channel_vertical: 15
   freq: 50
-  i2c_address: 0x40
+  i2c_address: 64
   servo_min_us: 500
   servo_max_us: 2500
   max_angle_horizontal: 270
   max_angle_vertical: 180
-
-# Paramètres de déplacement de la caméra
 camera_movement:
-  mode: 1       # 0 = fixe, 1 = balayage périodique, 2 = suivi normal
-  enable: False       #Ancien flag conservé mais on va se baser sur "mode"
+  mode: 0
+  enable: false
   horizontal_min_angle: 0
   horizontal_max_angle: 270
   vertical_min_angle: 45
   vertical_max_angle: 135
-  scan_speed: 1   #vitesse de balayage (degrés par itération)
-  scan_period: 15   #Temps (sec) entre deux balayages
-
-# Paramètres pour déplacer la fenêtre de l'application
+  scan_speed: 1
+  scan_period: 15
 window_mover:
-  window_name: "Hailo Detection App"  # Nom de la fenêtre à déplacer
-  move_x: 440                         # Position X
-  move_y: 62                          # Position Y
-  max_retries: 10                     # Nombre maximal de tentatives
-  delay: 3                            # Délai entre les tentatives (en secondes)
-
-# === Nouveaux paramètres de suivi ===
+  window_name: Hailo Detection App
+  move_x: 440
+  move_y: 62
+  max_retries: 10
+  delay: 3
 tracking:
-  max_age: 30                        # Nombre maximal de frames sans mise à jour avant suppression de la piste
-  min_hits: 3                        # Nombre minimal de mises à jour réussies avant d'afficher la piste
-  iou_threshold: 0.2                 # Seuil IoU pour l'association des détections
-  dt: 0.03                           # Intervalle de temps entre les mises à jour pour le filtre de Kalman
+  max_age: 30
+  min_hits: 3
+  iou_threshold: 0.2
+  dt: 0.03
   kalman_filter:
-    Q:                                # Bruit du modèle (matrice Q)
-      - [1, 0, 0, 0, 0, 0]        # incertirtude sur la position horizontale
-      - [0, 1, 0, 0, 0, 0]        # incertirtude sur la position verticale  
-      - [0, 0, 1, 0, 0, 0]        # incertirtude sur la vitesse horizontale 
-      - [0, 0, 0, 1, 0, 0]        # incertirtude sur la vitesse verticale
-      - [0, 0, 0, 0, 1, 0]        # incertirtude sur la largeur de l'objet
-      - [0, 0, 0, 0, 0, 1]        # incertirtude sur la hauteur de l'objet
-    R:                                # Bruit de la mesure (matrice R)
-      - [1, 0, 0, 0]            # variance de la mesure de la position horizontale
-      - [0, 1, 0, 0]            # variance de la mesure de la position verticale
-      - [0, 0, 1, 0]            # variance de la mesure de la largeur de l'objet
-      - [0, 0, 0, 1]            # variance de la mesure de la hauteur de l'objet
-
-#fin de config.yaml
+    Q:
+    - - 1
+      - 0
+      - 0
+      - 0
+      - 0
+      - 0
+    - - 0
+      - 1
+      - 0
+      - 0
+      - 0
+      - 0
+    - - 0
+      - 0
+      - 1
+      - 0
+      - 0
+      - 0
+    - - 0
+      - 0
+      - 0
+      - 1
+      - 0
+      - 0
+    - - 0
+      - 0
+      - 0
+      - 0
+      - 1
+      - 0
+    - - 0
+      - 0
+      - 0
+      - 0
+      - 0
+      - 1
+    R:
+    - - 1
+      - 0
+      - 0
+      - 0
+    - - 0
+      - 1
+      - 0
+      - 0
+    - - 0
+      - 0
+      - 1
+      - 0
+    - - 0
+      - 0
+      - 0
+      - 1
