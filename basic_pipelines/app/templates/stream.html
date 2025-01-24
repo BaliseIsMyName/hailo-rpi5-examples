@@ -10,7 +10,18 @@
       <!-- Bouton pour changer le mode -->
       <button id="mode-button" class="mode-button" style="background-color: red;">   
       </button>
-
+      <div class="checkbox-container" style="margin-top: 20px;">
+            <h3>Track Objects</h3>
+            <label>
+                  <input type="checkbox" id="cat-checkbox" value="cat" />
+                  cat
+            </label>
+            <label>
+                  <input type="checkbox" id="person-checkbox" value="person" />
+                  person
+            </label>
+            <button id="save-objects-btn" style="margin-left: 15px;">Save Objects</button>
+      </div>
 </div>
 
 <!-- Inclure hls.js depuis un CDN -->
@@ -19,9 +30,12 @@
       const video = document.getElementById('video');
       const videoSrc = "{{ stream_url }}";
       const modeButton = document.getElementById('mode-button');
+      const catCheckbox = document.getElementById('cat-checkbox');
+      const personCheckbox = document.getElementById('person-checkbox');
+      const saveObjectsBtn = document.getElementById('save-objects-btn');
 
       // Couleurs associées aux différents modes (0, 1, 2)
-      const modeColors = ['red', 'green', 'blue'];
+      const modeColors = ['#ec6152', '#52ec97', '#5271ec'];
 
       // Fonction pour récupérer le mode sur le serveur
       function fetchMode() {
@@ -81,6 +95,45 @@
                   .catch(err => console.error(err));
       });
 
+      // ----- PARTIE 2 : Gestion de track_objects -----
+
+      // 2.1) Récupérer la liste track_objects existante
+      function fetchTrackObjects() {
+            return fetch('/track_objects')
+                  .then(response => response.json())
+                  .then(data => data.track_objects || []);
+      }
+
+      // 2.2) Mettre à jour la liste track_objects sur le serveur
+      function updateTrackObjects(objectsList) {
+            return fetch('/track_objects', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ track_objects: objectsList })
+            })
+                  .then(r => r.json());
+      }
+
+      // 2.3) Initialiser l'état des checkboxes selon la config
+      fetchTrackObjects()
+            .then(trackObjects => {
+                  catCheckbox.checked = trackObjects.includes('cat');
+                  personCheckbox.checked = trackObjects.includes('person');
+            })
+            .catch(err => console.error(err));
+
+      // 2.4) Au clic sur "Save Objects", on envoie la liste cochée
+      saveObjectsBtn.addEventListener('click', () => {
+            const newList = [];
+            if (catCheckbox.checked) newList.push('cat');
+            if (personCheckbox.checked) newList.push('person');
+
+            updateTrackObjects(newList)
+                  .then(data => {
+                        console.log('track_objects mis à jour:', data.track_objects);
+                  })
+                  .catch(err => console.error(err));
+      });
       // Configuration du streaming HLS
       if (Hls.isSupported()) {
             const hls = new Hls();

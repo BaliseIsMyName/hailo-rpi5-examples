@@ -23,16 +23,28 @@ def load_mode() -> int:
     return camera_movement.get("mode", 0)
 
 def save_mode(mode: int) -> None:
-    """Écrit la valeur 'mode' dans config.yaml sous camera_movement['mode']."""
+    """Écrit la valeur 'mode' dans config.yaml sous camera_movement['mode']."""  
     config = {}
     if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH, "r") as f:
             config = yaml.safe_load(f) or {}
+
+    # S'assurer que la section camera_movement existe
     if "camera_movement" not in config:
         config["camera_movement"] = {}
+
+    # Mettre à jour le mode
     config["camera_movement"]["mode"] = mode
+
+    # Réécriture complète du fichier config.yaml
     with open(CONFIG_PATH, "w") as f:
-        yaml.safe_dump(config, f, sort_keys=False)
+        yaml.safe_dump(
+            config,
+            f,
+            sort_keys=False,         # On garde l'ordre des clés
+            default_flow_style=False # Écriture “multiligne” au lieu d'une seule ligne
+        )
+
 
 
 # ========== PARTIE 2 : Gestion du bouton Power (/dev/input/event5) et LEDS 16,5,6 ==========

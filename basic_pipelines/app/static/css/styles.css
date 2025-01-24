@@ -97,7 +97,7 @@ body.stream-page video {
 #mode-button {
       display: flex;
       flex-wrap: nowrap;
-      background-color: red;
+      background-color: #ec6152;
       flex-flow: column;
       border: transparent;
       box-shadow: 0px 0px 12px #bab7b7;

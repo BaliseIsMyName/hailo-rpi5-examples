@@ -498,7 +498,11 @@ class CameraController:
         self.scanning_in_progress = False
         self.scanning_angle = 0.0
         self.scanning_direction = +1  # +1 = va vers la droite, -1 = retour
-        
+        self.detection_count = 0
+        self.required_persistent_frames = 2  # au choix : 2 ou 3 frames
+        self.scanning_reversals = 0
+        self.scanning_to_center = False
+        self.next_scan_time = 0.0
         self.user_data: UserAppCallback = user_data
         self.thread: threading.Thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
@@ -542,22 +546,33 @@ class CameraController:
                 dead_zone = self.user_data.dead_zone
                 p_mode = self.persistent_mode  # persistent mode
 
-            # Mode 0 = fixe
+            # ********************* LOGIQUE SUR LA DÉTECTION PERSISTANTE *********************
+            if camera_mode == 1:
+                # Si on a une détection sur cette frame
+                if center is not None and time_since_update == 0:
+                    self.detection_count += 1
+                    if self.detection_count >= self.required_persistent_frames:
+                        # On bascule en mode 2 (suivi), car on a rencontré
+                        # une détection "persistante" plus de N frames
+                        with self.lock:
+                            self.camera_mode = 2
+                        logger.info(
+                            f"Détection persistante ({self.detection_count} frames). "
+                            f"Passage en mode 2 (suivi)."
+                        )
+                else:
+                    # Pas de détection ou plus mise à jour => on réinitialise
+                    self.detection_count = 0
+            
+            # ********************* GESTION DES 3 MODES *********************
             if camera_mode == 0:
                 self.camera_deplacement.position_zero()
                 time.sleep(0.5)
                 continue
 
-            # Mode 1 = balayage
             elif camera_mode == 1:
-                # Vérifier détection
-                if center is not None and time_since_update == 0:
-                    with self.lock:
-                        self.camera_mode = 2
-                        self.last_detection_time = time.time()
-                    logger.info("Détection trouvée en mode 1 : passage en mode 2 (suivi).")
-                    continue
-                # Sinon balayage
+                # On n’entre ici que si on n’a pas forcé le passage en mode 2.
+                # => procéder au balayage
                 self.handle_scanning()
 
             # Mode 2 = suivi
@@ -585,22 +600,6 @@ class CameraController:
                             logger.info("Aucune détection récente : retour au mode 1 (balayage).")
 
             time.sleep(0.01)
-            
-            # if enable_movement:
-            #     if center is not None and time_since_update == 0:
-            #         x_center, y_center = center
-            #         # Vérifier si l'objet est en dehors de la zone morte
-            #         if (abs(x_center - 0.5) > dead_zone or
-            #                 abs(y_center - 0.5) > dead_zone):
-            #             self.camera_deplacement.update_position(x_center, y_center)
-            #             self.movement = (x_center, y_center)
-            #         else:
-            #             self.camera_deplacement.update_position(0.5, 0.5)
-            #     else:
-            #         self.camera_deplacement.update_position(0.5, 0.5)
-            # else:
-                
-            #     self.camera_deplacement.update_position(0.5, 0.5)
                 
             # Gestion des logs significatifs
             if self.is_significant_movement(self.movement):
@@ -611,43 +610,104 @@ class CameraController:
 
     def handle_scanning(self) -> None:
         """
-        Gère le balayage horizontal en mode 1.
-        - La caméra part de 0° et va jusqu'à 270°, puis revient à 0°, etc.
-        - On effectue un balayage complet toutes les 'scan_period' secondes.
+        Gère un balayage horizontal qui démarre à l'angle actuel
+        et fait 2 allers-retours, puis revient au centre.
         """
         now = time.time()
-        # Si on n'est pas en cours de balayage
+
+        # Calcul de l'angle central
+        center_angle = (self.camera_deplacement.horizontal_min_angle +
+                        self.camera_deplacement.horizontal_max_angle) / 2.0
+
+        # 1) Si on n'est pas déjà en cours de balayage
         if not self.scanning_in_progress:
-            if now >= self.next_scan_time:
-                # Démarrage d'un nouveau balayage
-                logger.info("Démarrage du balayage horizontal.")
-                self.scanning_in_progress = True
-                self.scanning_angle = self.camera_deplacement.horizontal_min_angle
+            # Vérifier si c'est l'heure de lancer un nouveau cycle de balayage
+            if now < self.next_scan_time:
+                # On attend la prochaine fenêtre
+                return
+            
+            # => On démarre un nouveau balayage
+            self.scanning_in_progress = True
+            # On prend la position actuelle du servo horizontal
+            self.scanning_angle = self.camera_deplacement.servo_horizontal.current_angle
+            
+            # Déterminer la direction initiale en fonction de la position vs le centre
+            if self.scanning_angle < center_angle:
                 self.scanning_direction = +1
             else:
-                # Attendre la prochaine fenêtre
-                self.camera_deplacement.position_zero()
-                return
+                self.scanning_direction = -1
+            
+            self.scanning_reversals = 0
+            self.scanning_to_center = False
+            
+            logger.info(
+                f"Nouvelle séquence de balayage: angle_depart={self.scanning_angle:.1f}, "
+                f"direction={self.scanning_direction}, time={now}"
+            )
+        
+        # 2) Si on est au stade "retourner au centre" (après 2 allers-retours)
+        if self.scanning_to_center:
+            # On bouge doucement vers l'angle central
+            desired = center_angle
+            step = self.scan_speed
+            # Signe du déplacement
+            direction_to_center = +1 if (desired > self.scanning_angle) else -1
 
-        # On est en plein balayage
-        new_angle = self.scanning_angle + self.scanning_direction * self.scan_speed
-        # Saturation
+            new_angle = self.scanning_angle + direction_to_center * step
+            # Si on dépasse la cible, on se cale pile sur le center_angle
+            if (direction_to_center > 0 and new_angle >= desired) or \
+               (direction_to_center < 0 and new_angle <= desired):
+                # On a atteint le centre
+                new_angle = desired
+                self.scanning_in_progress = False
+                self.scanning_to_center = False
+                self.next_scan_time = now + self.scan_period
+                logger.info(
+                    f"Balayage terminé et positionné au centre (angle={new_angle:.1f}). "
+                    f"Prochain balayage après {self.scan_period}s."
+                )
+            
+            # Appliquer l'angle
+            self.scanning_angle = new_angle
+            self.camera_deplacement.servo_horizontal.set_servo_angle(self.scanning_angle)
+            # Option: on garde le vertical "centré" aussi
+            self.camera_deplacement.servo_vertical.set_servo_angle(
+                (self.camera_deplacement.vertical_min_angle + 
+                 self.camera_deplacement.vertical_max_angle) / 2.0
+            )
+            return
+        
+        # 3) Sinon, on est en plein balayage "gauche-droite" ou "droite-gauche"
+        step = self.scan_speed
+        new_angle = self.scanning_angle + self.scanning_direction * step
+        
+        # Vérifier limites
         if new_angle >= self.camera_deplacement.horizontal_max_angle:
             new_angle = self.camera_deplacement.horizontal_max_angle
-            self.scanning_direction = -1
+            self.scanning_reversals += 1
+
+            if self.scanning_reversals < 2:
+                # On inverse la direction pour continuer
+                self.scanning_direction = -1
+            else:
+                # On enclenche le retour au centre
+                self.scanning_to_center = True
+        
         elif new_angle <= self.camera_deplacement.horizontal_min_angle:
             new_angle = self.camera_deplacement.horizontal_min_angle
-            # Fin du balayage -> on revient à la position 0 -> stop
-            self.scanning_in_progress = False
-            self.next_scan_time = time.time() + self.scan_period
-            logger.info("Balayage terminé, on attend la prochaine période.")
-        
+            self.scanning_reversals += 1
+
+            if self.scanning_reversals < 2:
+                self.scanning_direction = +1
+            else:
+                self.scanning_to_center = True
+
+        # Appliquer
         self.scanning_angle = new_angle
-        # Mettre à jour servo horizontal
         self.camera_deplacement.servo_horizontal.set_servo_angle(self.scanning_angle)
-        # On garde l'angle vertical inchangé ou à mi-chemin
         self.camera_deplacement.servo_vertical.set_servo_angle(
-            (self.camera_deplacement.vertical_min_angle + self.camera_deplacement.vertical_max_angle)/2.0
+            (self.camera_deplacement.vertical_min_angle + 
+             self.camera_deplacement.vertical_max_angle) / 2.0
         )
         
 

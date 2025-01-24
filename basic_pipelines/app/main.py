@@ -184,3 +184,41 @@ def set_camera_mode(
 
     write_config(config)
     return {"mode": new_mode}
+
+@app.get("/track_objects")
+def get_track_objects(current_user: schemas.User = Depends(oauth2.get_current_user)):
+    """
+    Récupère la liste track_objects dans config.yaml
+    (par défaut cat/person) et la renvoie sous forme JSON.
+    """
+    config = read_config()
+    # On attend une liste (ex: ["cat","person"])
+    objects_list = config.get("track_objects", [])
+    # On s’assure que c’est une liste, sinon on renvoie au moins []
+    if not isinstance(objects_list, list):
+        objects_list = []
+    return {"track_objects": objects_list}
+
+
+@app.post("/track_objects")
+def set_track_objects(
+    data: dict,
+    current_user: schemas.User = Depends(oauth2.get_current_user)
+):
+    """
+    Met à jour la liste track_objects dans config.yaml.
+    data doit être un JSON du type:
+      {
+        "track_objects": ["cat", "person"]
+      }
+    """
+    new_objs = data.get("track_objects")
+    if not isinstance(new_objs, list):
+        raise HTTPException(status_code=400, detail="track_objects must be a list.")
+
+    # On met à jour config.yaml
+    config = read_config()
+    config["track_objects"] = new_objs
+    write_config(config)
+
+    return {"track_objects": new_objs}

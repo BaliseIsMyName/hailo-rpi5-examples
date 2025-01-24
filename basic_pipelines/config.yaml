@@ -2,9 +2,9 @@ camera_movement:
   enable: false
   horizontal_max_angle: 270
   horizontal_min_angle: 0
-  mode: 0
+  mode: 1
   scan_period: 15
-  scan_speed: 1
+  scan_speed: 0.7
   vertical_max_angle: 135
   vertical_min_angle: 45
 confidence_threshold: 0.6
@@ -32,9 +32,7 @@ servo:
   max_angle_vertical: 180
   servo_max_us: 2500
   servo_min_us: 500
-track_objects:
-- person
-- cat
+track_objects: []
 tracking:
   dt: 0.03
   iou_threshold: 0.2
