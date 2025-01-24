@@ -1,51 +1,43 @@
-track_objects:
-- person
-- cat
+camera_movement:
+  enable: false
+  horizontal_max_angle: 270
+  horizontal_min_angle: 0
+  mode: 0
+  scan_period: 15
+  scan_speed: 1
+  vertical_max_angle: 135
+  vertical_min_angle: 45
 confidence_threshold: 0.6
 dead_zone: 0.1
-pid:
-  horizontal:
-    kp: 200
-    ki: 0.1
-    kd: 10
-  vertical:
-    kp: 200
-    ki: 0.1
-    kd: 10
 fader:
   enable: true
   max_distance: 0.5
-  min_factor: 0.1
   max_factor: 1
+  min_factor: 0.1
+pid:
+  horizontal:
+    kd: 10
+    ki: 0.1
+    kp: 200
+  vertical:
+    kd: 10
+    ki: 0.1
+    kp: 200
 servo:
   channel_horizontal: 0
   channel_vertical: 15
   freq: 50
   i2c_address: 64
-  servo_min_us: 500
-  servo_max_us: 2500
   max_angle_horizontal: 270
   max_angle_vertical: 180
-camera_movement:
-  mode: 0
-  enable: false
-  horizontal_min_angle: 0
-  horizontal_max_angle: 270
-  vertical_min_angle: 45
-  vertical_max_angle: 135
-  scan_speed: 1
-  scan_period: 15
-window_mover:
-  window_name: Hailo Detection App
-  move_x: 440
-  move_y: 62
-  max_retries: 10
-  delay: 3
+  servo_max_us: 2500
+  servo_min_us: 500
+track_objects:
+- person
+- cat
 tracking:
-  max_age: 30
-  min_hits: 3
-  iou_threshold: 0.2
   dt: 0.03
+  iou_threshold: 0.2
   kalman_filter:
     Q:
     - - 1
@@ -101,3 +93,11 @@ tracking:
       - 0
       - 0
       - 1
+  max_age: 30
+  min_hits: 3
+window_mover:
+  delay: 3
+  max_retries: 10
+  move_x: 440
+  move_y: 62
+  window_name: Hailo Detection App

@@ -6,6 +6,11 @@
 <div class="container stream-page">
       <h2>LIVE</h2>
       <video id="video" controls autoplay muted></video>
+
+      <!-- Bouton pour changer le mode -->
+      <button id="mode-button" class="mode-button" style="background-color: red;">   
+      </button>
+
 </div>
 
 <!-- Inclure hls.js depuis un CDN -->
@@ -13,7 +18,70 @@
 <script>
       const video = document.getElementById('video');
       const videoSrc = "{{ stream_url }}";
+      const modeButton = document.getElementById('mode-button');
 
+      // Couleurs associées aux différents modes (0, 1, 2)
+      const modeColors = ['red', 'green', 'blue'];
+
+      // Fonction pour récupérer le mode sur le serveur
+      function fetchMode() {
+            return fetch('/camera_mode')
+                  .then(response => response.json())
+                  .then(data => {
+                        return data.mode;
+                  });
+      }
+
+      // Fonction pour mettre à jour le mode sur le serveur
+      function updateMode(newMode) {
+            return fetch('/camera_mode', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ mode: newMode })
+            })
+                  .then(response => response.json())
+                  .then(data => {
+                        return data.mode;
+                  });
+      }
+
+      // Mettre la couleur du bouton en fonction du mode
+      function setButtonColor(modeValue) {
+            const index = modeValue % 3; // 0, 1 ou 2
+            modeButton.style.backgroundColor = modeColors[index];
+      }
+
+      // Récupération initiale du mode au chargement de la page
+      fetchMode()
+            .then(mode => {
+                  setButtonColor(mode);
+            })
+            .catch(err => console.error(err));
+
+      // Vérifier régulièrement si le mode a changé ailleurs
+      setInterval(() => {
+            fetchMode()
+                  .then(mode => {
+                        setButtonColor(mode);
+                  })
+                  .catch(err => console.error(err));
+      }, 5000);  // toutes les 5 secondes
+
+      // Gérer le clic sur le bouton
+      modeButton.addEventListener('click', () => {
+            fetchMode()
+                  .then(mode => {
+                        // Incrémente le mode (0 -> 1 -> 2 -> 0)
+                        let newMode = (mode + 1) % 3;
+                        return updateMode(newMode);
+                  })
+                  .then(updatedMode => {
+                        setButtonColor(updatedMode);
+                  })
+                  .catch(err => console.error(err));
+      });
+
+      // Configuration du streaming HLS
       if (Hls.isSupported()) {
             const hls = new Hls();
             hls.loadSource(videoSrc);
@@ -21,8 +89,7 @@
             hls.on(Hls.Events.MANIFEST_PARSED, function () {
                   video.play();
             });
-      }
-      else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
             video.src = videoSrc;
             video.addEventListener('loadedmetadata', function () {
                   video.play();

@@ -94,6 +94,32 @@ body.stream-page video {
       border: 2px solid #fff;
 }
 
+#mode-button {
+      display: flex;
+      flex-wrap: nowrap;
+      background-color: red;
+      flex-flow: column;
+      border: transparent;
+      box-shadow: 0px 0px 12px #bab7b7;
+      border-radius: 50%;
+      width: 60px;
+      height: 60px;
+      justify-content: center;
+      align-items: center;
+      margin: auto;
+      margin-top: 20px;
+}
+
+#mode-button:hover {
+      cursor: pointer;
+      box-shadow: 0px 0px 12px #161414;
+}
+
+#mode-button:active {
+      cursor: pointer;
+      box-shadow: 0px 0px 5px #848080;
+}
+
 /* Bandeau de navigation */
 .navbar {
       width: 100%;

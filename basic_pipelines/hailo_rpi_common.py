@@ -395,28 +395,28 @@ class GStreamerApp:
         return True
     
     def attach_dynamic_pad(self, pipeline):
-        print("Attaching dynamic pad handler...")
+        # print("Attaching dynamic pad handler...")
         h264pay = pipeline.get_by_name("x264enc")
         if h264pay:
-            print("x264enc found. Connecting to pad-added signal...")
+            # print("x264enc found. Connecting to pad-added signal...")
             h264pay.connect("pad-added", self.on_pad_added)
-        else:
-            print("x264enc not found. Dynamic pad handler not attached.")
+        # else:
+            # print("x264enc not found. Dynamic pad handler not attached.")
 
     def on_pad_added(self, element, pad):
-        print(f"Dynamic pad added: {pad.get_name()}")
+        # print(f"Dynamic pad added: {pad.get_name()}")
         if pad.get_name() == "src":
             pad.add_probe(Gst.PadProbeType.BUFFER | Gst.PadProbeType.EVENT_DOWNSTREAM, self.extract_caps)
 
     
     def attach_probe_to_h264pay(self, pipeline):
         # Ajoute une sonde pour capturer les caps
-        print("Attaching probe to rtph264pay...")
+        # print("Attaching probe to rtph264pay...")
         h264pay = pipeline.get_by_name('rtph264pay')  # Remplacez par le nom exact de votre élément
         # for element in self.pipeline.iterate_elements():
         #     print(f"Element: {element.get_name()}")
         if h264pay:
-            print("rtph264pay element found.")
+            # print("rtph264pay element found.")
             self.attach_dynamic_pad(h264pay)
             pad = h264pay.get_static_pad('src')
             # caps = pad.get_current_caps()
@@ -425,14 +425,14 @@ class GStreamerApp:
             # else:
             #     print("No caps found at READY state")
             if pad:
-                print("Pad 'src' found. Attaching probe...")
+                # print("Pad 'src' found. Attaching probe...")
                 pad.add_probe(Gst.PadProbeType.BUFFER | Gst.PadProbeType.EVENT_DOWNSTREAM, self.extract_caps)
-                print(f"Pad found: {pad.get_name()}")
-            else:
-                print("No pad found")
-                print("No 'src' pad found on rtph264pay.")
-        else:
-            print("rtph264pay element not found in pipeline.")
+                # print(f"Pad found: {pad.get_name()}")
+        #     else:
+        #         print("No pad found")
+        #         print("No 'src' pad found on rtph264pay.")
+        # else:
+        #     print("rtph264pay element not found in pipeline.")
             
     def extract_caps(self, pad, info):
         # Intercepter les caps pour extraire les paramètres
@@ -441,10 +441,10 @@ class GStreamerApp:
             structure = caps.get_structure(0)  # Récupère la première structure
             profile_level_id = structure.get_string('profile-level-id')
             sprop_parameter_sets = structure.get_string('sprop-parameter-sets')
-            print(f"profile-level-id: {profile_level_id}")
-            print(f"sprop-parameter-sets: {sprop_parameter_sets}")
-        else:
-            print("No caps found")
+            # print(f"profile-level-id: {profile_level_id}")
+            # print(f"sprop-parameter-sets: {sprop_parameter_sets}")
+        # else:
+            # print("No caps found")
         return Gst.PadProbeReturn.OK
     
     def create_pipeline(self):
@@ -489,10 +489,10 @@ class GStreamerApp:
             print(f"QoS message received from {qos_element}")
         elif t == Gst.MessageType.ELEMENT:
             structure = message.get_structure()
-            if structure:
-                print(f"Message from element {structure.get_name()}: {structure.to_string()}")
-        else:
-            print(f"Unhandled message: {t}")
+        #     if structure:
+        #         print(f"Message from element {structure.get_name()}: {structure.to_string()}")
+        # else:
+        #     print(f"Unhandled message: {t}")
         return True
 
 

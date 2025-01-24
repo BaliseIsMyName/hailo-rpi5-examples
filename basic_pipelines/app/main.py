@@ -17,6 +17,21 @@ from starlette.requests import Request
 from . import models, schemas, crud, utils, database, oauth2
 from .config import ADMIN_PASSWORD, STREAM_URL  # Importer STREAM_URL
 
+import yaml
+
+# Emplacement du fichier config.yaml
+CONFIG_PATH = "/home/raspi/hailo-rpi5-examples/basic_pipelines/config.yaml"
+
+def read_config():
+    """Lit le contenu de config.yaml et retourne un dictionnaire Python."""
+    with open(CONFIG_PATH, "r") as f:
+        return yaml.safe_load(f)
+
+def write_config(config_data):
+    """Écrit le dictionnaire Python dans config.yaml."""
+    with open(CONFIG_PATH, "w") as f:
+        yaml.safe_dump(config_data, f)
+
 # Configurer le limiteur
 limiter = Limiter(key_func=get_remote_address)
 
@@ -139,3 +154,33 @@ async def read_stream(request: Request, current_user: schemas.User = Depends(oau
 async def get_profile(request: Request, current_user: schemas.User = Depends(oauth2.get_current_user)):
     return templates.TemplateResponse("profile.html", {"request": request, "user": current_user})
 
+@app.get("/camera_mode")
+def get_camera_mode(current_user: schemas.User = Depends(oauth2.get_current_user)):
+    """
+    Récupère le 'mode' actuel dans config.yaml (camera_movement -> mode).
+    """
+    config = read_config()
+    current_mode = config.get("camera_movement", {}).get("mode", 0)
+    return {"mode": current_mode}
+
+@app.post("/camera_mode")
+def set_camera_mode(
+    data: dict,
+    current_user: schemas.User = Depends(oauth2.get_current_user)
+):
+    """
+    Met à jour le 'mode' dans config.yaml (camera_movement -> mode).
+    data doit être un JSON contenant {"mode": <valeur_entière>}.
+    """
+    new_mode = data.get("mode")
+    if new_mode is None:
+        raise HTTPException(status_code=400, detail="No mode provided")
+
+    config = read_config()
+    # On s'assure que camera_movement existe bien
+    if "camera_movement" not in config:
+        config["camera_movement"] = {}
+    config["camera_movement"]["mode"] = new_mode
+
+    write_config(config)
+    return {"mode": new_mode}

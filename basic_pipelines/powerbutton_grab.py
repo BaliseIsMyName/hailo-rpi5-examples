@@ -277,7 +277,7 @@ async def handle_button_gpio23():
 
     while True:
         # On attend un événement
-        ev_line = btn_line.event_wait()  # on check toutes 0.1s
+        ev_line = btn_line.event_wait()
         if ev_line:
             event = btn_line.event_read()
             # On détecte un front descendant
@@ -289,6 +289,14 @@ async def handle_button_gpio23():
                 print(f"[GPIO23] Nouveau mode={current_mode}, sauvegardé dans config.yaml.")
                 # Mise à jour LED
                 set_config_led(current_mode)
+                
+        # Vérifie si le fichier config.yaml a changé la valeur du mode
+        new_mode = load_mode()
+        if new_mode != current_mode:
+            current_mode = new_mode
+            set_config_led(current_mode)
+            print(f"[GPIO23] Mode détecté à {current_mode} (changement manuel dans config.yaml)")
+
         await asyncio.sleep(0.01)
 
 
