@@ -10,6 +10,9 @@ import yaml
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import os
+import shutil
+from datetime import datetime
+import re
 
 import board
 import busio
@@ -89,7 +92,291 @@ class UserAppCallback(app_callback_class):
         self.detection_event: threading.Event = threading.Event()
         self.lock: threading.Lock = threading.Lock()
         self.dead_zone: float = DEAD_ZONE
+  
+  
+class HlsSegmentRecorder:
+    """
+    Gère la copie des segments HLS dans un dossier temporaire
+    et la création d'une vidéo finale quand la détection se termine.
+    """
+
+    def __init__(self,
+                 hls_folder: str = "/var/www/html/hailo_app/stream/hls",
+                 tmp_folder: str = "/tmp/hls_segments",
+                 final_folder: str = "/home/raspi/Videos/records",
+                 segment_extension: str = ".ts",
+                 poll_interval: float = 1.0,
+                 frame_threshold: int = 10):
+        """
+        Args:
+            hls_folder:        Dossier où sont générés les segments HLS.
+            tmp_folder:        Dossier temporaire où on recopie les segments utiles.
+            final_folder:      Dossier final où on range la vidéo reconstituée.
+            segment_extension: Extension des segments HLS (".ts", ".m4s", etc.).
+            poll_interval:     Intervalle en secondes pour scruter le dossier HLS.
+        """
+        self.hls_folder = hls_folder
+        self.tmp_folder = tmp_folder
+        self.final_folder = final_folder
+        self.segment_extension = segment_extension
+        self.poll_interval = poll_interval
+
+        self.frame_threshold = frame_threshold  # Initialiser l'attribut
+
+        self.valid_detection_frame_count = 0  # Initialiser le compteur
         
+        # État
+        self.detection_active = False
+        self.running = True
+        self.lock = threading.Lock()
+
+        # Pour éviter de recopier 100 fois le même segment
+        self.copied_segments = set()
+
+        # Thread de scrutation
+        self.thread = threading.Thread(target=self._copy_loop, daemon=True)
+        self.thread.start()
+
+    def start_detection(self):
+        """
+        Démarre la copie des segments (si pas déjà en cours).
+        """
+        with self.lock:
+            if not self.detection_active:
+                self.detection_active = True
+                # On mémorise le moment de début, pour nommer le fichier final
+                self.start_time = datetime.now()
+                # On ré-initialise la liste des segments copiés
+                self.copied_segments.clear()
+
+                print("[HlsSegmentRecorder] Détection démarrée : start_detection()")
+                
+    @staticmethod        
+    def extract_segment_number(path: str) -> int:
+        """
+        Extrait la partie numérique d'un nom de fichier de type 'stream-298.ts'.
+        Retourne 999999999 si rien n'est trouvé, pour éviter les crash.
+        """
+        filename = os.path.basename(path)  # ex: "stream-298.ts"
+        m = re.search(r'stream-(\d+)\.ts$', filename)
+        if m:
+            return int(m.group(1))
+        else:
+            return 999999999
+    
+    def stop_detection_and_finalize(self, objects_detected=None, valid_frame_count: int = 0):
+        """
+        Arrête la copie, assemble les segments en un fichier unique, et déplace le résultat.
+        """
+        with self.lock:
+            if self.detection_active:
+                self.detection_active = False
+                print("[HlsSegmentRecorder] Fin détection : stop_detection_and_finalize()")
+                
+                # Seuil de validation
+                FRAME_THRESHOLD = self.frame_threshold  # Nombre de frames nécessaires pour valider l'enregistrement
+                
+                if valid_frame_count < FRAME_THRESHOLD:
+                    logger.info(f"Enregistrement invalidé : {valid_frame_count} frames détectées, seuil {FRAME_THRESHOLD}")
+                    # Nettoyer les segments temporaires sans créer de fichier final
+                    for seg in self.copied_segments.copy():
+                        dst_path = os.path.join(self.tmp_folder, seg)
+                        try:
+                            os.remove(dst_path)
+                            logger.info(f"[HlsSegmentRecorder] Segment {seg} supprimé (enregistrement invalidé).")
+                        except OSError:
+                            logger.error(f"[HlsSegmentRecorder] Erreur suppression segment {seg}.")
+                    self.copied_segments.clear()
+                    return  # Ne pas créer de fichier final
+                
+                
+                # On choisit un nom final, ex. "cat+person_2025-01-25_12-30.mp4"
+                if not objects_detected:
+                    objects_detected = ["unknown"]
+                objects_str = "+".join(sorted(objects_detected))
+
+                now_str = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")  
+                final_name = f"{objects_str}_{now_str}.mp4"
+                final_path = os.path.join(self.final_folder, final_name)
+
+                # 1) Récupère la liste des fichiers segments .ts dans tmp_folder
+                all_files = os.listdir(self.tmp_folder)
+                ts_files = [f for f in all_files if f.endswith(self.segment_extension)]
+                if not ts_files:
+                    print("[HlsSegmentRecorder] Aucun segment à assembler.")
+                    return
+
+                # 2) Construit la liste complète (chemin absolu) et trie par numéro
+                segment_fullpaths = [os.path.join(self.tmp_folder, f) for f in ts_files]
+                segment_list = sorted(segment_fullpaths, key=self.extract_segment_number)
+
+                # 3) Créer un fichier "mylist.txt" pour la concaténation
+                list_path = os.path.join(self.tmp_folder, "mylist.txt")
+                with open(list_path, "w") as f:
+                    for seg in segment_list:
+                        # Chemins absolus, escapés
+                        f.write(f"file '{seg}'\n")
+
+                # 4) Appeler ffmpeg pour concaténer (copie directe sans ré-encodage)
+                cmd = [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error",
+                    "-f", "concat", "-safe", "0",
+                    "-i", list_path,
+                    "-c", "copy",
+                    final_path
+                ]
+                print(f"[HlsSegmentRecorder] Assemblage final avec ffmpeg : {cmd}")
+                subprocess.run(cmd)
+
+                # 5) Nettoyer les segments temporaires
+                for seg in segment_list:
+                    try:
+                        os.remove(seg)
+                    except OSError:
+                        pass
+                try:
+                    os.remove(list_path)
+                except OSError:
+                    pass
+
+                print(f"[HlsSegmentRecorder] Vidéo finale : {final_path}")
+                
+                self.cleanup_old_videos("/home/raspi/Videos/records")
+
+    def stop_all(self):
+        """
+        Appelée lors de la fermeture de l'application pour terminer proprement.
+        """
+        self.running = False
+        self.thread.join()
+        print("[HlsSegmentRecorder] Thread de copie arrêté.")
+
+    def _copy_loop(self):
+        while self.running:
+            time.sleep(self.poll_interval)
+
+            if not self.detection_active:
+                continue
+
+            try:
+                files = os.listdir(self.hls_folder)
+            except FileNotFoundError:
+                continue
+
+            ts_files = sorted([
+                f for f in files if f.endswith(self.segment_extension)
+            ])
+
+            for fname in ts_files:
+                with self.lock:
+                    if not self.detection_active:
+                        break
+
+                    if fname not in self.copied_segments:
+                        src_path = os.path.join(self.hls_folder, fname)
+                        dst_path = os.path.join(self.tmp_folder, fname)
+
+                        # Vérifier la taille stable
+                        if self._file_is_stable(src_path):
+                            os.makedirs(self.tmp_folder, exist_ok=True)
+                            try:
+                                shutil.copy2(src_path, dst_path)
+                                self.copied_segments.add(fname)
+                            except Exception as e:
+                                print(f"[HlsSegmentRecorder] Erreur copie {fname}: {e}")
+
+    def _file_is_stable(self, filepath, check_delay=0.5):
+        """Vérifie que la taille du fichier ne change plus sur check_delay secondes."""
+        try:
+            size1 = os.path.getsize(filepath)
+            time.sleep(check_delay)
+            size2 = os.path.getsize(filepath)
+            return (size1 == size2)
+        except OSError:
+            return False
+    
+    @staticmethod
+    def cleanup_old_videos(records_folder: str = "/home/raspi/Videos/records"):
+        """
+        Conserve toutes les vidéos du jour.
+        Conserve ensuite suffisamment de vidéos "anciennes" pour ne pas dépasser 10 au total.
+        Supprime le reste des vidéos les plus anciennes.
+        """
+        if not os.path.exists(records_folder):
+            return
+
+        # Lister tous les fichiers .mp4 (ou .mkv, etc.) dans records_folder
+        all_files = [f for f in os.listdir(records_folder) if f.endswith(".mp4")]
+        if not all_files:
+            return
+
+        # Créer une structure (filepath complet + date extraite + ctime).
+        # On suppose que le nom contient "YYYY-mm-dd_HH-MM"
+        today_str = datetime.now().strftime("%Y-%m-%d")  # ex "2025-01-26"
+
+        videos_info = []
+        for fname in all_files:
+            fullpath = os.path.join(records_folder, fname)
+            
+            # 1) Extraire la date du nom : "cat+person_2025-01-26_16-42.mp4"
+            #    On cherche un pattern du type: _YYYY-MM-DD_HH-MM
+            #    Pas à pas ou via regex
+            m = re.search(r'_(\d{4}-\d{2}-\d{2})_(\d{2}:\d{2}:\d{2})\.mp4$', fname)
+            if m:
+                file_date_str = m.group(1)  # ex "2025-01-26"
+                # file_time_str = m.group(2) # ex "16-42" (pas forcément utile)
+            else:
+                file_date_str = "9999-99-99"  # si le pattern n'est pas trouvé
+            # On stocke (fullpath, is_today, ctime, filename)
+            st = os.stat(fullpath)
+            ctime = st.st_ctime  # en secondes
+            is_today = (file_date_str == today_str)
+
+            videos_info.append({
+                "path": fullpath,
+                "filename": fname,
+                "date_str": file_date_str,
+                "is_today": is_today,
+                "ctime": ctime
+            })
+
+        # Séparer en 2 groupes : les vidéos "d'aujourd'hui" et les "anciennes"
+        todays = [v for v in videos_info if v["is_today"]]
+        olds   = [v for v in videos_info if not v["is_today"]]
+
+        # On conserve toutes les vidéos "aujourd'hui"
+        # On veut un total final <= 10, sauf si today's alone est déjà > 10 => on s'en fiche, on conserve tout
+        # => On calcule combien de slots il reste pour les "olds"
+        nb_today = len(todays)
+        if nb_today >= 10:
+            # On ne supprime aucune d'aujourd'hui, même si c'est au-delà de 10
+            # => On supprime toutes les olds
+            for vid in olds:
+                try:
+                    os.remove(vid["path"])
+                    print(f"[cleanup_old_videos] Removed old video {vid['filename']}")
+                except:
+                    pass
+            return
+        else:
+            # nb_today < 10 => on peut garder un certain nombre d'old
+            # => on trie olds par ctime desc (plus récent en premier)
+            # => on garde les plus récents tant qu'on n'atteint pas 10 total
+            olds_sorted = sorted(olds, key=lambda v: v["ctime"], reverse=True)  # plus récent d'abord
+            # combien on peut garder d'olds ?
+            slots_available = 10 - nb_today
+            keep_olds = olds_sorted[:slots_available]   # on garde les plus récents
+            remove_olds = olds_sorted[slots_available:] # on supprime le reste
+
+            for vid in remove_olds:
+                try:
+                    os.remove(vid["path"])
+                    print(f"[cleanup_old_videos] Removed old video {vid['filename']}")
+                except:
+                    pass
+
+        print("[cleanup_old_videos] Cleanup done.")
+
 # =============================
 # ======= TRACK SELECTOR ======
 # =============================
@@ -472,7 +759,8 @@ class CameraController:
     def __init__(
         self, 
         camera_deplacement: CameraDeplacement, 
-        user_data: UserAppCallback
+        user_data: UserAppCallback,
+        segment_recorder
         ) -> None:
         self.camera_deplacement: CameraDeplacement = camera_deplacement
         self.current_center: Optional[Tuple[float, float]] = None
@@ -480,6 +768,14 @@ class CameraController:
         self.lock: threading.Lock = threading.Lock()
         self.running: bool = True
         self.enable_movement: bool = CAMERA_MOVEMENT_ENABLE
+        
+        self.segment_recorder = segment_recorder  # instance de HlsSegmentRecorder
+        self.detection_active = False
+        self.no_detection_timer = None
+        self.no_detection_delay = 7.0  # 10s
+        self.detected_objects = set()
+        
+        self.valid_detection_frame_count = 0  # Compteur de frames valides
         
         self.movement = (0, 0)  # Position par défaut
         # Attributs pour la gestion des logs significatifs
@@ -530,12 +826,66 @@ class CameraController:
     def set_enable_movement(self, enable: bool) -> None:
         with self.lock:
             self.enable_movement = enable
-            
-    def update_info(self, center: Optional[Tuple[float, float]], time_since_update: Optional[int]) -> None:
+
+    def no_detection_timeout(self):
+        """
+        Appelé après X sec sans détection. On arrête donc l'enregistrement.
+        """
+        with self.user_data.lock:
+            if self.detection_active:
+                self.detection_active = False
+                # On arrête l'enregistrement et on assemble
+                self.segment_recorder.stop_detection_and_finalize(
+                    objects_detected=self.detected_objects,
+                    valid_frame_count=self.valid_detection_frame_count
+                    )
+                self.detected_objects.clear()
+                self.reset_valid_frame_count()
+
+    def reset_valid_frame_count(self):
+            with self.lock:
+                self.valid_detection_frame_count = 0
+                logger.debug("valid_detection_frame_count réinitialisé via reset_valid_frame_count().")
+                
+    def update_info(self, center: Optional[Tuple[float, float]], time_since_update: Optional[int], label_list=None) -> None:
         with self.lock:
             self.current_center = center
             self.time_since_update = time_since_update
             logger.debug(f"CameraController updated info -> Center: {center}, Time Since Update: {time_since_update}")
+
+        with self.user_data.lock:
+            if center is not None and time_since_update == 0:
+                self.valid_detection_frame_count += 1
+                # print(f'frame ok : {self.valid_detection_frame_count}')
+                logger.debug(f"Valid detection frame count: {self.valid_detection_frame_count}")
+
+                # => Il y a une détection en cours
+                if not self.detection_active:
+                    # On démarre la détection
+                    self.detection_active = True
+                    self.detected_objects = set(label_list or [])
+                    self.segment_recorder.start_detection()
+
+                else:
+                    # Détection déjà active, on ajoute les nouveaux labels
+                    if label_list:
+                        self.detected_objects |= set(label_list)
+
+                # Annuler le timer de non-détection
+                if self.no_detection_timer:
+                    self.no_detection_timer.cancel()
+                    self.no_detection_timer = None
+
+            else:
+                # => plus de détection sur cette frame
+                if self.detection_active:
+                    # On lance un timer de latence
+                    if not self.no_detection_timer:
+                        self.no_detection_timer = threading.Timer(
+                            self.no_detection_delay,
+                            self.no_detection_timeout
+                            )
+                        self.no_detection_timer.start()
 
     def run(self) -> None:
         while self.running:
@@ -710,7 +1060,6 @@ class CameraController:
              self.camera_deplacement.vertical_max_angle) / 2.0
         )
         
-
     def is_significant_movement(self, current_movement: Tuple[float, float]) -> bool:
         """
         Détermine si le déplacement actuel est significatif par rapport au dernier déplacement loggué.
@@ -725,9 +1074,11 @@ class CameraController:
 
     def stop(self) -> None:
         self.running = False
+        if self.no_detection_timer:
+            self.no_detection_timer.cancel()
         self.thread.join()
+        self.segment_recorder.stop_all()
         logger.info("CameraController thread stopped.")
-
 
 # =============================
 # ======= CONFIGURATION ========
@@ -1134,7 +1485,6 @@ def reload_config(detection_app: 'DetectionApp', config_path: str = "config.yaml
 
     logger.info("Configuration rechargée et appliquée (avec vérification et fallback).")
 
-
 # ========================================
 # =============== MAIN ===================
 # ========================================
@@ -1275,7 +1625,7 @@ class DetectionApp:
         signal.signal(signal.SIGTERM, self.signal_handler)
         signal.signal(signal.SIGINT, self.signal_handler)
         logger.info("Gestionnaires de signaux enregistrés.")
-
+        recording_frame_threshold = 10
         # Thread pour déplacer la fenêtre vidéo
         window_mover_thread = threading.Thread(target=self.move_window_thread, daemon=True)
         window_mover_thread.start()
@@ -1291,10 +1641,18 @@ class DetectionApp:
         camera_deplacement.position_zero()
         # camera_deplacement.position_turn()
         logger.info("Déplacement de la caméra initialisé et positionné à zéro.")
-
+        
+        hls_recorder = HlsSegmentRecorder(
+            hls_folder="/var/www/html/hailo_app/stream/hls",
+            tmp_folder="/tmp/hls_segments",
+            final_folder="/home/raspi/Videos/records",
+            segment_extension=".ts",
+            poll_interval=1.0,
+            frame_threshold=recording_frame_threshold
+        )
         # Initialiser le TrackSelector et le CameraController
         self.state.user_data.track_selector = TrackSelector()
-        self.state.user_data.camera_controller = CameraController(camera_deplacement, self.state.user_data)
+        self.state.user_data.camera_controller = CameraController(camera_deplacement, self.state.user_data, segment_recorder=hls_recorder)
         logger.info("TrackSelector et CameraController initialisés.")
 
         # Récupérer le cairo_overlay pour dessiner
@@ -1347,7 +1705,11 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data: UserAppCallbac
         roi = hailo.get_roi_from_buffer(buffer)
         detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
         user_data.last_detections = detections
-
+        detection_labels = []
+        for d in detections:
+            if d.get_label() in TRACK_OBJECTS and d.get_confidence() >= CONFIDENCE_THRESHOLD:
+                detection_labels.append(d.get_label())
+                
         # Mise à jour des centres des bbox
         calculate_bbox_centers(user_data, CONFIDENCE_THRESHOLD)
 
@@ -1375,9 +1737,16 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data: UserAppCallbac
         # Obtenir les informations de la piste sélectionnée
         selected_center, time_since_update = user_data.track_selector.get_selected_track_info()
         if selected_center:
-            user_data.camera_controller.update_info(selected_center, time_since_update)
+            user_data.camera_controller.update_info(
+                selected_center,
+                time_since_update,
+                label_list=detection_labels)
         else:
-            user_data.camera_controller.update_info(None, None)
+            user_data.camera_controller.update_info(
+                None, 
+                None,
+                label_list=detection_labels
+            )
 
         return Gst.PadProbeReturn.OK
     except Exception as e:

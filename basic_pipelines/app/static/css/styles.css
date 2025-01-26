@@ -45,7 +45,7 @@ h2 {
       height: auto;
             /* ou width: 100%; etc. selon ton besoin */
       margin: 0 auto;
-      margin-top: 50px;
+      margin-top: 0px;
             /* centrer éventuellement */
 }
 /* video {
@@ -55,6 +55,14 @@ h2 {
       object-fit: contain;
       /* ou contain, selon si tu veux rogner ou pas */
 /* } */ 
+
+.liste-videos{
+      display: flex;
+      flex-direction: column;
+      flex-wrap: nowrap;
+      list-style-type: none;
+      margin: auto;
+}
 
 .index-page .button {
       font-size: 3em;

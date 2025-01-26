@@ -2,7 +2,7 @@
 
 from fastapi import FastAPI, Depends, HTTPException, status, Request, Response
 from fastapi.security import OAuth2PasswordRequestForm
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles  # Importer StaticFiles
 from sqlalchemy.orm import Session
@@ -18,6 +18,8 @@ from . import models, schemas, crud, utils, database, oauth2
 from .config import ADMIN_PASSWORD, STREAM_URL  # Importer STREAM_URL
 
 import yaml
+import shutil
+import os
 
 # Emplacement du fichier config.yaml
 CONFIG_PATH = "/home/raspi/hailo-rpi5-examples/basic_pipelines/config.yaml"
@@ -32,6 +34,27 @@ def write_config(config_data):
     with open(CONFIG_PATH, "w") as f:
         yaml.safe_dump(config_data, f)
 
+def archive_video(filename: str, from_folder="/home/raspi/Videos/records", archive_folder="/home/raspi/Videos/archives"):
+    """
+    Déplace le fichier 'filename' de from_folder vers archive_folder.
+    Retourne True si ok, False sinon.
+    """
+    src = os.path.join(from_folder, filename)
+    dst = os.path.join(archive_folder, filename)
+    
+    if not os.path.exists(src):
+        return False
+    
+    # Créer le dossier d'archives s'il n'existe pas
+    os.makedirs(archive_folder, exist_ok=True)
+
+    try:
+        shutil.move(src, dst)
+        return True
+    except Exception as e:
+        print(f"Erreur d'archivage de {src} vers {dst}: {e}")
+        return False
+
 # Configurer le limiteur
 limiter = Limiter(key_func=get_remote_address)
 
@@ -42,6 +65,8 @@ app.add_exception_handler(429, _rate_limit_exceeded_handler)
 
 # Monter le répertoire static pour les fichiers CSS, JS, etc.
 app.mount("/static", StaticFiles(directory="/home/raspi/hailo-rpi5-examples/basic_pipelines/app/static"), name="static")
+
+app.mount("/records_static", StaticFiles(directory="/home/raspi/Videos/records"), name="records_static")
 
 # Configurer les templates
 templates = Jinja2Templates(directory="/home/raspi/hailo-rpi5-examples/basic_pipelines/app/templates")
@@ -68,7 +93,29 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 # Page d'accueil (login requis)
 @app.get("/", response_class=HTMLResponse)
 async def read_home(request: Request, current_user: schemas.User = Depends(oauth2.get_current_user)):
-      return templates.TemplateResponse("index.html", {"request": request, "user": current_user})
+    folder = "/home/raspi/Videos/records"
+    videos = []
+    if os.path.exists(folder):
+        files = [f for f in os.listdir(folder) if f.endswith(".mp4")]
+        # On trie par ctime desc
+        files_info = []
+        for fname in files:
+            fullpath = os.path.join(folder, fname)
+            st = os.stat(fullpath)
+            files_info.append({
+                "filename": fname,
+                "ctime": st.st_ctime
+            })
+        files_info.sort(key=lambda x: x["ctime"], reverse=True)
+        # On prend les 10 premiers
+        top10 = files_info[:10]
+        videos = top10
+
+    return templates.TemplateResponse("index.html", {
+        "request": request,
+        "user": current_user,
+        "videos": videos
+    })
 
 # Page de login
 @app.get("/loginN", response_class=HTMLResponse)
@@ -222,3 +269,98 @@ def set_track_objects(
     write_config(config)
 
     return {"track_objects": new_objs}
+
+# *** Nouvel Endpoint : Obtenir la liste des objets disponibles pour le suivi ***
+@app.get("/track_objects_list")
+def get_track_objects_list(current_user: schemas.User = Depends(oauth2.get_current_user)):
+    """
+    Récupère la liste track_objects_list dans config.yaml
+    et la renvoie sous forme JSON.
+    """
+    config = read_config()
+    track_objects_list = config.get("track_objects_list", [])
+    # On s’assure que c’est une liste, sinon on renvoie au moins []
+    if not isinstance(track_objects_list, list):
+        track_objects_list = []
+    return {"track_objects_list": track_objects_list}
+
+# Endpoint pour mettre à jour la liste des objets disponibles (optionnel)
+@app.post("/track_objects_list")
+def set_track_objects_list(
+    data: dict,
+    current_user: schemas.User = Depends(oauth2.get_current_user)
+):
+    """
+    Met à jour la liste track_objects_list dans config.yaml.
+    data doit être un JSON du type:
+      {
+        "track_objects_list": ["cat", "person", "dog"]
+      }
+    """
+    new_list = data.get("track_objects_list")
+    if not isinstance(new_list, list):
+        raise HTTPException(status_code=400, detail="track_objects_list must be a list.")
+
+    # Optionnel : Ajouter des validations supplémentaires ici (ex: vérifier les types)
+
+    # Mettre à jour config.yaml
+    config = read_config()
+    config["track_objects_list"] = new_list
+    write_config(config)
+
+    return {"track_objects_list": new_list}
+
+@app.get("/records_list")
+def records_list(current_user: schemas.User = Depends(oauth2.get_current_user)):
+    """
+    Renvoie la liste des vidéos dans /Videos/records, triées par date de création desc,
+    en format JSON : [{"filename": "...", "ctime": 12345678, "is_today": True/False}, ...]
+    """
+    folder = "/home/raspi/Videos/records"
+    if not os.path.exists(folder):
+        return []
+
+    files = [f for f in os.listdir(folder) if f.endswith(".mp4")]
+    out = []
+    for fname in files:
+        path = os.path.join(folder, fname)
+        st   = os.stat(path)
+        out.append({
+            "filename": fname,
+            "ctime": st.st_ctime
+        })
+    # Tri desc sur ctime
+    out.sort(key=lambda x: x["ctime"], reverse=True)
+    return out
+
+
+@app.get("/records/video/{filename}", response_class=FileResponse)
+def get_record_video(
+    filename: str,
+    current_user: schemas.User = Depends(oauth2.get_current_user)
+):
+    """
+    Retourne la vidéo en question (fichier MP4) si elle existe,
+    et si l'utilisateur est bien connecté.
+    """
+    folder = "/home/raspi/Videos/records"
+    path = os.path.join(folder, filename)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Video not found")
+    return FileResponse(path, media_type="video/mp4")
+
+@app.get("/archive")
+def archive_endpoint(
+    filename: str,
+    current_user: schemas.User = Depends(oauth2.get_current_user)
+):
+    """
+    Déplace la vidéo 'filename' de /home/raspi/Videos/records vers /home/raspi/Videos/archives.
+    Puis redirige vers la page d'accueil.
+    """
+    success = archive_video(filename)
+    if not success:
+        raise HTTPException(status_code=404, detail="Video not found or error archiving")
+
+    # On retourne à la page d'accueil pour recharger la liste
+    return RedirectResponse(url="/", status_code=302)
