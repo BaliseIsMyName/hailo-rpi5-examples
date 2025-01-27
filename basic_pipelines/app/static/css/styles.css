@@ -56,7 +56,7 @@ h2 {
       /* ou contain, selon si tu veux rogner ou pas */
 /* } */ 
 
-.liste-videos{
+.liste-videos, .liste-archives {
       display: flex;
       flex-direction: column;
       flex-wrap: nowrap;

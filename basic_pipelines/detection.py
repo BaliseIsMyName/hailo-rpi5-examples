@@ -13,6 +13,7 @@ import os
 import shutil
 from datetime import datetime
 import re
+from collections import defaultdict
 
 import board
 import busio
@@ -32,6 +33,8 @@ from hailo_rpi_common import (
 )
 from detection_pipeline import GStreamerDetectionApp
 from deepsort_tracker import DeepSORTTracker
+
+from notifBot import send_telegram_message
 
 import logging
 from dataclasses import dataclass, field
@@ -105,8 +108,7 @@ class HlsSegmentRecorder:
                  tmp_folder: str = "/tmp/hls_segments",
                  final_folder: str = "/home/raspi/Videos/records",
                  segment_extension: str = ".ts",
-                 poll_interval: float = 1.0,
-                 frame_threshold: int = 10):
+                 poll_interval: float = 1.0):
         """
         Args:
             hls_folder:        Dossier où sont générés les segments HLS.
@@ -121,17 +123,21 @@ class HlsSegmentRecorder:
         self.segment_extension = segment_extension
         self.poll_interval = poll_interval
 
-        self.frame_threshold = frame_threshold  # Initialiser l'attribut
-
-        self.valid_detection_frame_count = 0  # Initialiser le compteur
+        # Définir les seuils de frames par classe directement dans le code
+        self.frame_thresholds = {
+            "person": 20,
+            "cat": 30  # Assurez-vous que cela correspond à CameraController
+        }
         
+        self.valid_detection_frame_count = 0  # Initialiser le compteur
+        self.detection_active_labels = set()
+        self.copied_segments = set()  # Segments copiés par classe
+        self.start_times = defaultdict(datetime)
+    
         # État
         self.detection_active = False
         self.running = True
         self.lock = threading.Lock()
-
-        # Pour éviter de recopier 100 fois le même segment
-        self.copied_segments = set()
 
         # Thread de scrutation
         self.thread = threading.Thread(target=self._copy_loop, daemon=True)
@@ -139,18 +145,14 @@ class HlsSegmentRecorder:
 
     def start_detection(self):
         """
-        Démarre la copie des segments (si pas déjà en cours).
+        Démarre la copie des segments lorsqu'une détection valide commence.
         """
         with self.lock:
             if not self.detection_active:
                 self.detection_active = True
-                # On mémorise le moment de début, pour nommer le fichier final
-                self.start_time = datetime.now()
-                # On ré-initialise la liste des segments copiés
                 self.copied_segments.clear()
+                logger.info("[HlsSegmentRecorder] Détection démarrée. Commencement de la copie des segments.")
 
-                print("[HlsSegmentRecorder] Détection démarrée : start_detection()")
-                
     @staticmethod        
     def extract_segment_number(path: str) -> int:
         """
@@ -164,84 +166,101 @@ class HlsSegmentRecorder:
         else:
             return 999999999
     
-    def stop_detection_and_finalize(self, objects_detected=None, valid_frame_count: int = 0):
+    def stop_detection_and_finalize(self, valid_frame_counts: dict):
         """
-        Arrête la copie, assemble les segments en un fichier unique, et déplace le résultat.
+        Arrête la copie des segments, vérifie les seuils de frames valides par objet,
+        assemble les segments copiés en une vidéo si les seuils sont atteints,
+        renomme le fichier final avec les labels des objets détectés,
+        puis déplace la vidéo dans final_folder.
+        Sinon, supprime les segments copiés.
+        
+        Args:
+            valid_frame_counts (dict): Dictionnaire avec le nombre de frames valides par objet.
         """
         with self.lock:
             if self.detection_active:
                 self.detection_active = False
-                print("[HlsSegmentRecorder] Fin détection : stop_detection_and_finalize()")
+                logger.info("[HlsSegmentRecorder] Fin de détection. Arrêt de la copie des segments.")
+
+                # Vérifier si tous les objets atteignent le seuil de frames
+                objects_valid = [label for label, count in valid_frame_counts.items()
+                                 if count >= self.frame_thresholds.get(label, 30)]
                 
-                # Seuil de validation
-                FRAME_THRESHOLD = self.frame_threshold  # Nombre de frames nécessaires pour valider l'enregistrement
-                
-                if valid_frame_count < FRAME_THRESHOLD:
-                    logger.info(f"Enregistrement invalidé : {valid_frame_count} frames détectées, seuil {FRAME_THRESHOLD}")
+                if objects_valid:
+                    logger.info(f"Enregistrement validé pour les objets : {', '.join(objects_valid)}")
+                    # Assembler les segments en une vidéo finale
+                    self._assemble_segments(objects_valid)
+                else:
+                    logger.info("Enregistrement invalidé : seuil de frames non atteint pour les objets détectés.")
                     # Nettoyer les segments temporaires sans créer de fichier final
-                    for seg in self.copied_segments.copy():
-                        dst_path = os.path.join(self.tmp_folder, seg)
-                        try:
-                            os.remove(dst_path)
-                            logger.info(f"[HlsSegmentRecorder] Segment {seg} supprimé (enregistrement invalidé).")
-                        except OSError:
-                            logger.error(f"[HlsSegmentRecorder] Erreur suppression segment {seg}.")
-                    self.copied_segments.clear()
-                    return  # Ne pas créer de fichier final
-                
-                
-                # On choisit un nom final, ex. "cat+person_2025-01-25_12-30.mp4"
-                if not objects_detected:
-                    objects_detected = ["unknown"]
-                objects_str = "+".join(sorted(objects_detected))
+                    self._cleanup_segments()
 
-                now_str = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")  
-                final_name = f"{objects_str}_{now_str}.mp4"
-                final_path = os.path.join(self.final_folder, final_name)
+    def _assemble_segments(self, objects_valid: List[str]):
+        """
+        Concatène les segments copiés en une seule vidéo et déplace le fichier final.
 
-                # 1) Récupère la liste des fichiers segments .ts dans tmp_folder
-                all_files = os.listdir(self.tmp_folder)
-                ts_files = [f for f in all_files if f.endswith(self.segment_extension)]
-                if not ts_files:
-                    print("[HlsSegmentRecorder] Aucun segment à assembler.")
-                    return
+        Args:
+            objects_valid (List[str]): Liste des labels des objets validés.
+        """
+        if not self.copied_segments:
+            logger.warning("[HlsSegmentRecorder] Aucun segment à assembler.")
+            return
 
-                # 2) Construit la liste complète (chemin absolu) et trie par numéro
-                segment_fullpaths = [os.path.join(self.tmp_folder, f) for f in ts_files]
-                segment_list = sorted(segment_fullpaths, key=self.extract_segment_number)
+        # Trier les segments par numéro
+        ts_files_sorted = sorted(
+            self.copied_segments,
+            key=lambda x: int(re.search(r'stream-(\d+)\.ts$', x).group(1)) if re.search(r'stream-(\d+)\.ts$', x) else 0
+        )
 
-                # 3) Créer un fichier "mylist.txt" pour la concaténation
-                list_path = os.path.join(self.tmp_folder, "mylist.txt")
-                with open(list_path, "w") as f:
-                    for seg in segment_list:
-                        # Chemins absolus, escapés
-                        f.write(f"file '{seg}'\n")
+        segment_fullpaths = [os.path.join(self.tmp_folder, f) for f in ts_files_sorted]
 
-                # 4) Appeler ffmpeg pour concaténer (copie directe sans ré-encodage)
-                cmd = [
-                    "ffmpeg", "-hide_banner", "-loglevel", "error",
-                    "-f", "concat", "-safe", "0",
-                    "-i", list_path,
-                    "-c", "copy",
-                    final_path
-                ]
-                print(f"[HlsSegmentRecorder] Assemblage final avec ffmpeg : {cmd}")
-                subprocess.run(cmd)
+        # Créer un fichier "mylist.txt" pour ffmpeg
+        list_path = os.path.join(self.tmp_folder, "mylist.txt")
+        with open(list_path, "w") as f:
+            for seg in segment_fullpaths:
+                f.write(f"file '{seg}'\n")
 
-                # 5) Nettoyer les segments temporaires
-                for seg in segment_list:
-                    try:
-                        os.remove(seg)
-                    except OSError:
-                        pass
+        # Définir le nom final de la vidéo avec les labels des objets
+        objects_str = '+'.join(objects_valid)
+        now_str = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+        final_name = f"{objects_str}_{now_str}.mp4"
+        final_path = os.path.join(self.final_folder, final_name)
+
+        # Exécuter ffmpeg pour concaténer les segments
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-f", "concat", "-safe", "0",
+            "-i", list_path,
+            "-c", "copy",
+            final_path
+        ]
+        logger.info(f"[HlsSegmentRecorder] Assemblage final avec ffmpeg : {' '.join(cmd)}")
+        try:
+            subprocess.run(cmd, check=True)
+            logger.info(f"[HlsSegmentRecorder] Vidéo finale créée : {final_path}")
+
+            # Envoyer une notification Telegram
+            base_url = "www.boissard.net/records/video/"
+            video_url = f"{base_url}{final_name}"
+            message = f"Une nouvelle vidéo a été enregistrée : {video_url}"
+            send_telegram_message(message)
+
+            # Nettoyer les segments temporaires et le fichier de liste
+            for seg in ts_files_sorted:
                 try:
-                    os.remove(list_path)
+                    os.remove(os.path.join(self.tmp_folder, seg))
+                    logger.info(f"[HlsSegmentRecorder] Segment {seg} supprimé après assemblage.")
                 except OSError:
-                    pass
+                    logger.error(f"[HlsSegmentRecorder] Erreur lors de la suppression du segment {seg}.")
 
-                print(f"[HlsSegmentRecorder] Vidéo finale : {final_path}")
-                
-                self.cleanup_old_videos("/home/raspi/Videos/records")
+            try:
+                os.remove(list_path)
+                logger.info(f"[HlsSegmentRecorder] Fichier de liste {list_path} supprimé.")
+            except OSError:
+                logger.error(f"[HlsSegmentRecorder] Erreur lors de la suppression du fichier de liste {list_path}.")
+
+        except subprocess.CalledProcessError as e:
+            logger.error(f"[HlsSegmentRecorder] Erreur lors de l'assemblage des segments avec ffmpeg : {e}")
 
     def stop_all(self):
         """
@@ -255,35 +274,50 @@ class HlsSegmentRecorder:
         while self.running:
             time.sleep(self.poll_interval)
 
-            if not self.detection_active:
-                continue
+            with self.lock:
+                if not self.detection_active:
+                    continue
 
-            try:
-                files = os.listdir(self.hls_folder)
-            except FileNotFoundError:
-                continue
+                try:
+                    files = os.listdir(self.hls_folder)
+                    logger.debug(f"[HlsSegmentRecorder] Fichiers dans hls_folder: {files}")
+                except FileNotFoundError:
+                    logger.error(f"[HlsSegmentRecorder] Dossier HLS non trouvé: {self.hls_folder}")
+                    continue
 
-            ts_files = sorted([
-                f for f in files if f.endswith(self.segment_extension)
-            ])
+                ts_files = sorted([
+                    f for f in files if f.endswith(self.segment_extension)
+                ])
 
-            for fname in ts_files:
-                with self.lock:
-                    if not self.detection_active:
-                        break
-
+                for fname in ts_files:
                     if fname not in self.copied_segments:
                         src_path = os.path.join(self.hls_folder, fname)
                         dst_path = os.path.join(self.tmp_folder, fname)
 
-                        # Vérifier la taille stable
+                        # Vérifier la stabilité du fichier
                         if self._file_is_stable(src_path):
                             os.makedirs(self.tmp_folder, exist_ok=True)
                             try:
                                 shutil.copy2(src_path, dst_path)
                                 self.copied_segments.add(fname)
+                                logger.debug(f"[HlsSegmentRecorder] Segment {fname} copié.")
                             except Exception as e:
-                                print(f"[HlsSegmentRecorder] Erreur copie {fname}: {e}")
+                                logger.error(f"[HlsSegmentRecorder] Erreur copie {fname}: {e}")
+
+
+    def _cleanup_segments(self):
+        """
+        Supprime tous les segments copiés sans créer de fichier final.
+        """
+        for seg in self.copied_segments.copy():
+            dst_path = os.path.join(self.tmp_folder, seg)
+            try:
+                os.remove(dst_path)
+                logger.info(f"[HlsSegmentRecorder] Segment {seg} supprimé (enregistrement invalidé).")
+                self.copied_segments.remove(seg)
+            except OSError:
+                logger.error(f"[HlsSegmentRecorder] Erreur lors de la suppression du segment {seg}.")
+
 
     def _file_is_stable(self, filepath, check_delay=0.5):
         """Vérifie que la taille du fichier ne change plus sur check_delay secondes."""
@@ -775,7 +809,14 @@ class CameraController:
         self.no_detection_delay = 7.0  # 10s
         self.detected_objects = set()
         
-        self.valid_detection_frame_count = 0  # Compteur de frames valides
+        self.valid_detection_frame_counts = defaultdict(int)  # Compteur par classe
+        self.detection_active_classes = set()  # Classes actuellement enregistrement
+        
+        # Définir les seuils de frames par classe directement dans le code
+        self.frame_thresholds = {
+            "person": 20,
+            "cat": 30  # Augmenté pour réduire les faux positifs
+        }
         
         self.movement = (0, 0)  # Position par défaut
         # Attributs pour la gestion des logs significatifs
@@ -833,19 +874,27 @@ class CameraController:
         """
         with self.user_data.lock:
             if self.detection_active:
+                # Calculer le total des frames valides
+                total_valid_frames = sum(self.valid_detection_frame_counts.values())
+                self.segment_recorder.stop_detection_and_finalize(valid_frame_counts=self.valid_detection_frame_counts)
                 self.detection_active = False
-                # On arrête l'enregistrement et on assemble
-                self.segment_recorder.stop_detection_and_finalize(
-                    objects_detected=self.detected_objects,
-                    valid_frame_count=self.valid_detection_frame_count
-                    )
                 self.detected_objects.clear()
-                self.reset_valid_frame_count()
+                self.valid_detection_frame_counts.clear()
+                logger.info("Timeout sans détection : enregistrement arrêté.")
+        
+        # Réinitialiser tous les compteurs de frames
+        self.reset_valid_frame_count()
+
 
     def reset_valid_frame_count(self):
-            with self.lock:
-                self.valid_detection_frame_count = 0
-                logger.debug("valid_detection_frame_count réinitialisé via reset_valid_frame_count().")
+        """
+        Réinitialise les compteurs de frames valides pour toutes les classes.
+        """
+        with self.lock:
+            for label in self.valid_detection_frame_counts:
+                self.valid_detection_frame_counts[label] = 0
+            logger.debug("valid_detection_frame_counts réinitialisés via reset_valid_frame_count().")
+
                 
     def update_info(self, center: Optional[Tuple[float, float]], time_since_update: Optional[int], label_list=None) -> None:
         with self.lock:
@@ -854,37 +903,32 @@ class CameraController:
             logger.debug(f"CameraController updated info -> Center: {center}, Time Since Update: {time_since_update}")
 
         with self.user_data.lock:
-            if center is not None and time_since_update == 0:
-                self.valid_detection_frame_count += 1
-                # print(f'frame ok : {self.valid_detection_frame_count}')
-                logger.debug(f"Valid detection frame count: {self.valid_detection_frame_count}")
-
-                # => Il y a une détection en cours
-                if not self.detection_active:
-                    # On démarre la détection
-                    self.detection_active = True
-                    self.detected_objects = set(label_list or [])
-                    self.segment_recorder.start_detection()
-
-                else:
-                    # Détection déjà active, on ajoute les nouveaux labels
-                    if label_list:
-                        self.detected_objects |= set(label_list)
-
+            if center is not None and time_since_update == 0 and label_list:
+                for label in label_list:
+                    if label in TRACK_OBJECTS:
+                        self.valid_detection_frame_counts[label] += 1
+                        logger.debug(f"Frame valide pour '{label}': {self.valid_detection_frame_counts[label]}/{self.frame_thresholds.get(label, 30)}")
+                        
+                        # Vérifier si le seuil est atteint pour cette classe
+                        if (self.valid_detection_frame_counts[label] >= self.frame_thresholds.get(label, 30) and
+                            not self.detection_active):
+                            self.detection_active = True
+                            self.segment_recorder.start_detection()  # Démarrer la copie des segments
+                            logger.info(f"Détection validée pour '{label}'. Enregistrement démarré.")
+                        
                 # Annuler le timer de non-détection
                 if self.no_detection_timer:
                     self.no_detection_timer.cancel()
                     self.no_detection_timer = None
 
             else:
-                # => plus de détection sur cette frame
+                # Plus de détection sur cette frame
                 if self.detection_active:
-                    # On lance un timer de latence
                     if not self.no_detection_timer:
                         self.no_detection_timer = threading.Timer(
                             self.no_detection_delay,
                             self.no_detection_timeout
-                            )
+                        )
                         self.no_detection_timer.start()
 
     def run(self) -> None:
@@ -1144,6 +1188,8 @@ IOU_THRESHOLD: float = TRACKING_CONFIG.get("iou_threshold", 0.3)
 DT: float = TRACKING_CONFIG.get("dt", 1/25)
 KALMAN_Q: list = TRACKING_CONFIG.get("kalman_filter", {}).get("Q", None)
 KALMAN_R: list = TRACKING_CONFIG.get("kalman_filter", {}).get("R", None)
+
+# FRAME_THRESHOLDS: dict = config.get("frame_thresholds", {"person": 20, "cat": 20})
 
 # =============================
 # ======= EVENT CONFIG FILE ======
@@ -1625,7 +1671,7 @@ class DetectionApp:
         signal.signal(signal.SIGTERM, self.signal_handler)
         signal.signal(signal.SIGINT, self.signal_handler)
         logger.info("Gestionnaires de signaux enregistrés.")
-        recording_frame_threshold = 10
+        recording_frame_threshold = 20
         # Thread pour déplacer la fenêtre vidéo
         window_mover_thread = threading.Thread(target=self.move_window_thread, daemon=True)
         window_mover_thread.start()
@@ -1647,8 +1693,7 @@ class DetectionApp:
             tmp_folder="/tmp/hls_segments",
             final_folder="/home/raspi/Videos/records",
             segment_extension=".ts",
-            poll_interval=1.0,
-            frame_threshold=recording_frame_threshold
+            poll_interval=1.0
         )
         # Initialiser le TrackSelector et le CameraController
         self.state.user_data.track_selector = TrackSelector()

@@ -8,7 +8,7 @@
       <video id="video" controls autoplay muted></video>
 
       <!-- Bouton pour changer le mode -->
-      <button id="mode-button" class="mode-button" style="background-color: red;">   
+      <button id="mode-button" class="mode-button" style="background-color: red;">
       </button>
       <div class="checkbox-container" id="track-objects-container" style="margin-top: 20px;">
             <h3>Track Objects</h3>
@@ -22,25 +22,75 @@
       const video = document.getElementById('video');
       const videoSrc = "{{ stream_url }}";
       const modeButton = document.getElementById('mode-button');
-      const catCheckbox = document.getElementById('cat-checkbox');
       const trackObjectsContainer = document.getElementById('track-objects-container');
 
       // Couleurs associées aux différents modes (0, 1, 2)
       const modeColors = ['#ec6152', '#52ec97', '#5271ec'];
 
-      // Stockage local des track_objects_list pour détecter les changements
-      let currentTrackObjectsList = [];
+      let currentMode = 0; // Valeur par défaut, sera mise à jour dès le chargement
 
-      // Fonction pour récupérer le mode sur le serveur
-      function fetchMode() {
-            return fetch('/camera_mode')
-                  .then(response => response.json())
-                  .then(data => {
-                        return data.mode;
-                  });
+      // Stockage local des track_objects_list et track_objects pour détecter les changements
+      let currentTrackObjectsList = [];
+      let currentTrackObjects = [];
+
+      // WebSocket pour les mises à jour de mode et de track_objects
+      let socket = null;
+
+      function initializeWebSocket() {
+            // Établir la connexion WebSocket sécurisée
+            socket = new WebSocket(`wss://${window.location.host}/ws/mode`);
+
+            socket.onopen = function (event) {
+                  console.log('WebSocket connecté pour les mises à jour.');
+            };
+
+            socket.onmessage = function (event) {
+                  try {
+                        const message = JSON.parse(event.data);
+                        const type = message.type;
+                        const data = message.data;
+
+                        if (type === 'mode') {
+                              if (data.mode !== undefined) {
+                                    console.log('Mise à jour du mode reçue via WebSocket:', data.mode);
+                                    currentMode = data.mode; // Mettre à jour la variable
+                                    setButtonColor(currentMode);
+                              }
+                        } else if (type === 'track_objects') {
+                              if (Array.isArray(data)) {
+                                    console.log('Mise à jour de track_objects reçue via WebSocket:', data);
+                                    currentTrackObjects = data;
+                                    updateTrackObjectsCheckboxes();
+                              }
+                        } else if (type === 'track_objects_list') {
+                              if (Array.isArray(data)) {
+                                    console.log('Mise à jour de track_objects_list reçue via WebSocket:', data);
+                                    currentTrackObjectsList = data;
+                                    renderCheckboxes(currentTrackObjectsList, currentTrackObjects);
+                              }
+                        } else {
+                              console.warn('Type de message WebSocket inconnu:', type);
+                        }
+                  } catch (e) {
+                        console.error('Erreur lors du traitement du message WebSocket:', e);
+                  }
+            };
+
+            socket.onclose = function (event) {
+                  console.log('WebSocket fermé. Tentative de reconnexion dans 5 secondes...');
+                  setTimeout(initializeWebSocket, 5000);
+            };
+
+            socket.onerror = function (error) {
+                  console.error('Erreur WebSocket:', error);
+                  socket.close();
+            };
       }
 
-      // Fonction pour mettre à jour le mode sur le serveur
+      // Initialiser la connexion WebSocket au chargement de la page
+      initializeWebSocket();
+
+      // Fonction pour mettre à jour le mode sur le serveur via HTTP POST
       function updateMode(newMode) {
             return fetch('/camera_mode', {
                   method: 'POST',
@@ -59,34 +109,26 @@
             modeButton.style.backgroundColor = modeColors[index];
       }
 
-      // Récupération initiale du mode au chargement de la page
-      fetchMode()
-            .then(mode => {
-                  setButtonColor(mode);
+      // Récupération initiale du mode au chargement de la page via HTTP
+      fetch('/camera_mode')
+            .then(modeResponse => modeResponse.json())
+            .then(modeData => {
+                  currentMode = modeData.mode;
+                  setButtonColor(currentMode);
             })
-            .catch(err => console.error(err));
-
-      // Vérifier régulièrement si le mode a changé ailleurs
-      setInterval(() => {
-            fetchMode()
-                  .then(mode => {
-                        setButtonColor(mode);
-                  })
-                  .catch(err => console.error(err));
-      }, 5000);  // toutes les 5 secondes
+            .catch(err => console.error('Erreur lors de la récupération initiale du mode:', err));
 
       // Gérer le clic sur le bouton
       modeButton.addEventListener('click', () => {
-            fetchMode()
-                  .then(mode => {
-                        // Incrémente le mode (0 -> 1 -> 2 -> 0)
-                        let newMode = (mode + 1) % 3;
-                        return updateMode(newMode);
-                  })
+            let newMode = (currentMode + 1) % 3;
+            updateMode(newMode)
                   .then(updatedMode => {
+                        // currentMode sera mis à jour via le message WebSocket
+                        // mais vous pouvez également le mettre à jour ici pour une meilleure UX
+                        currentMode = updatedMode;
                         setButtonColor(updatedMode);
                   })
-                  .catch(err => console.error(err));
+                  .catch(err => console.error('Erreur lors de la mise à jour du mode:', err));
       });
 
       // ----- PARTIE 2 : Gestion dynamique de track_objects -----
@@ -122,11 +164,9 @@
       function initializeTrackObjects() {
             Promise.all([fetchTrackObjectsList(), fetchTrackObjects()])
                   .then(([trackObjectsList, trackObjects]) => {
-                        // Vérifier si la liste a changé
-                        if (JSON.stringify(trackObjectsList) !== JSON.stringify(currentTrackObjectsList)) {
-                              currentTrackObjectsList = trackObjectsList;
-                              renderCheckboxes(trackObjectsList, trackObjects);
-                        }
+                        currentTrackObjectsList = trackObjectsList;
+                        currentTrackObjects = trackObjects;
+                        renderCheckboxes(currentTrackObjectsList, currentTrackObjects);
                   })
                   .catch(err => console.error(err));
       }
@@ -163,6 +203,14 @@
             });
       }
 
+      // Fonction pour mettre à jour les checkboxes en fonction de track_objects
+      function updateTrackObjectsCheckboxes() {
+            const checkboxes = trackObjectsContainer.querySelectorAll('input[type="checkbox"]');
+            checkboxes.forEach(cb => {
+                  cb.checked = currentTrackObjects.includes(cb.value);
+            });
+      }
+
       // 2.5) Gérer les changements des checkboxes
       function handleCheckboxChange() {
             // Récupérer tous les checkboxes
@@ -177,17 +225,15 @@
                   .then(data => {
                         console.log('track_objects mis à jour:', data.track_objects);
                   })
-                  .catch(err => console.error(err));
+                  .catch(err => console.error('Erreur lors de la mise à jour de track_objects:', err));
       }
 
       // Initialiser les checkboxes au chargement de la page
       initializeTrackObjects();
 
-      // Vérifier régulièrement si track_objects_list a changé
-      setInterval(() => {
-            initializeTrackObjects();
-      }, 10000); // toutes les 10 secondes
-            
+      // Gérer les mises à jour des track_objects via WebSocket
+      // (Déjà géré dans socket.onmessage)
+
       // Configuration du streaming HLS
       if (Hls.isSupported()) {
             const hls = new Hls();

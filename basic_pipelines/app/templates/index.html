@@ -11,14 +11,71 @@
       <ul class="liste-videos">
             {% for vid in videos %}
             <li>
-                  <!-- <strong>{{ vid.filename }}</strong> -->
                   <br>
-                  <a href="/records/video/{{ vid.filename }}" target="_blank">{{ vid.filename }}</a>
+                  <a href="/records/video/{{ vid.filename | urlencode }}" target="_blank">{{ vid.filename }}</a>
                   |
-                  <!-- Lien ou formulaire pour archiver -->
-                  <a href="/archive?filename={{ vid.filename }}">Archiver</a>
+                  <a href="/archive?filename={{ vid.filename | urlencode }}">Archiver</a>
+                  |
+                  <a href="/delete?filename={{ vid.filename | urlencode }}"
+                        onclick="return confirm('Supprimer cette vidéo ?')">Supprimer</a>
             </li>
             {% endfor %}
       </ul>
+
+      <h2>Archives</h2>
+      <button id="toggle-archives-btn" onclick="toggleArchives()">Afficher les archives</button>
+      <button id="hide-archives-btn" onclick="toggleArchives()" style="display: none;">Masquer les archives</button>
+      <div id="archives-list" style="display: none;">
+            <ul class="liste-archives">
+                  {% for vid in archives %}
+                  <li>
+                        <br>
+                        <a href="/records/video/{{ vid.filename | urlencode }}" target="_blank">{{ vid.filename }}</a>
+                        |
+                        <a href="/delete?filename={{ vid.filename | urlencode }}"
+                              onclick="return confirm('Supprimer cette archive ?')">Supprimer</a>
+                  </li>
+                  {% endfor %}
+            </ul>
+      </div>
 </div>
+
+<script>
+      // Fonction pour afficher les archives
+      function showArchives() {
+            document.getElementById("archives-list").style.display = "block";
+            document.getElementById("toggle-archives-btn").style.display = "none";
+            document.getElementById("hide-archives-btn").style.display = "inline-block";
+            localStorage.setItem("archivesOpen", "true");
+      }
+
+      // Fonction pour masquer les archives
+      function hideArchives() {
+            document.getElementById("archives-list").style.display = "none";
+            document.getElementById("toggle-archives-btn").style.display = "inline-block";
+            document.getElementById("hide-archives-btn").style.display = "none";
+            localStorage.setItem("archivesOpen", "false");
+      }
+
+      // Fonction pour basculer l'état des archives
+      function toggleArchives() {
+            const archivesOpen = localStorage.getItem("archivesOpen");
+            if (archivesOpen === "true") {
+                  hideArchives();
+            } else {
+                  showArchives();
+            }
+      }
+
+      // Initialisation de l'état des archives lors du chargement de la page
+      document.addEventListener("DOMContentLoaded", () => {
+            const archivesOpen = localStorage.getItem("archivesOpen");
+            if (archivesOpen === "true") {
+                  showArchives();
+            } else {
+                  hideArchives();
+            }
+      });
+</script>
+
 {% endblock %}
