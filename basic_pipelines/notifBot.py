@@ -1,8 +1,8 @@
 import requests
 
 def send_telegram_message(message):
-    bot_token = "7901097779:AAGocOO9Jo6izSboutxoN_FgHMlsZ5Ebk5M"
-    chat_id = "5217542674"
+    bot_token = ""
+    chat_id = ""
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {
         "chat_id": chat_id,
@@ -30,5 +30,5 @@ def send_telegram_message(message):
 #         print(f"Erreur : {response.status_code}, {response.text}")
 
 # # Remplacez "VOTRE_BOT_TOKEN" par le token fourni par BotFather
-# bot_token = "7901097779:AAGocOO9Jo6izSboutxoN_FgHMlsZ5Ebk5M"
+# bot_token = ""
 # get_chat_id(bot_token)
